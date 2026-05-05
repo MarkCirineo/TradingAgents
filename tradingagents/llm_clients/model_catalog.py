@@ -114,6 +114,20 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Qwen3:latest (8B, local)", "qwen3:latest"),
         ],
     },
+    "nvidia": {
+        "quick": [
+            ("Llama 3.1 8B Instruct - Fast, free tier friendly", "meta/llama-3.1-8b-instruct"),
+            ("Llama 3.3 70B Instruct - Strong reasoning", "meta/llama-3.3-70b-instruct"),
+            ("Mistral Large 2 Instruct - Multilingual, tool use", "mistralai/mistral-large-2-instruct"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("Llama 3.3 70B Instruct - Strong reasoning", "meta/llama-3.3-70b-instruct"),
+            ("Llama 3.1 70B Instruct - Proven, stable", "meta/llama-3.1-70b-instruct"),
+            ("Mistral Large 2 Instruct - Multilingual, tool use", "mistralai/mistral-large-2-instruct"),
+            ("Custom model ID", "custom"),
+        ],
+    },
 }
 
 
