@@ -219,7 +219,7 @@ __marimo__/
 **/data_cache/
 
 # Artifacts
-/artifacts
+artifacts/
 
 # Reports
-/reports
+reports/
