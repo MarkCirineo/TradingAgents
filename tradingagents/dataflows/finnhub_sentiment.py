@@ -158,10 +158,11 @@ def _fetch_recommendation_trends(ticker: str, api_key: str) -> str:
 
 
 def get_social_sentiment(ticker: str, curr_date: str, look_back_days: int = 7) -> str:
-    """Fetch sentiment data from Finnhub for a given ticker.
+    """Fetch sentiment data from Finnhub and StockTwits for a given ticker.
 
-    Combines insider sentiment (MSPR) and analyst recommendation trends
-    to provide a comprehensive sentiment picture using Finnhub's free tier.
+    Combines:
+      1. Finnhub insider sentiment (MSPR) and analyst recommendation trends
+      2. StockTwits real social media posts with user-tagged sentiment
 
     Args:
         ticker: Stock ticker symbol (e.g. "AAPL", "NVDA").
@@ -185,7 +186,13 @@ def get_social_sentiment(ticker: str, curr_date: str, look_back_days: int = 7) -
         f"## Sentiment & Consensus Report for {ticker}",
         f"**Analysis date**: {curr_date}",
         "",
+        "---",
+        "",
     ]
+
+    # ── Part 1: Finnhub Data (Analyst Consensus & Insider Activity) ──
+    lines.append("# Part 1: Professional Analyst Consensus (Finnhub)")
+    lines.append("")
 
     # Fetch insider sentiment
     insider_section = _fetch_insider_sentiment(
@@ -197,5 +204,19 @@ def get_social_sentiment(ticker: str, curr_date: str, look_back_days: int = 7) -
     # Fetch analyst recommendations
     recommendation_section = _fetch_recommendation_trends(clean_ticker, api_key)
     lines.append(recommendation_section)
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ── Part 2: StockTwits Social Sentiment (Real Retail Trader Posts) ──
+    lines.append("# Part 2: Retail Trader Sentiment (StockTwits)")
+    lines.append("")
+    try:
+        from .stocktwits_sentiment import get_stocktwits_sentiment
+        stocktwits_section = get_stocktwits_sentiment(clean_ticker, curr_date)
+        lines.append(stocktwits_section)
+    except Exception as e:
+        lines.append(f"*StockTwits data unavailable: {e}*")
 
     return "\n".join(lines)
+
