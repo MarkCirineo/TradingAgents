@@ -116,15 +116,16 @@ MODEL_OPTIONS: ProviderModeOptions = {
     },
     "nvidia": {
         "quick": [
-            ("Llama 3.1 8B Instruct - Fast, free tier friendly", "meta/llama-3.1-8b-instruct"),
+            ("Mistral Small 4 119B - Fast agents (0.3s)", "mistralai/mistral-small-4-119b-2603"),
+            ("Nemotron 3 Super 120B - NVIDIA agentic (0.6s)", "nvidia/nemotron-3-super-120b-a12b"),
             ("Llama 3.3 70B Instruct - Strong reasoning", "meta/llama-3.3-70b-instruct"),
-            ("Mistral Large 2 Instruct - Multilingual, tool use", "mistralai/mistral-large-2-instruct"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("Llama 3.3 70B Instruct - Strong reasoning", "meta/llama-3.3-70b-instruct"),
-            ("Llama 3.1 70B Instruct - Proven, stable", "meta/llama-3.1-70b-instruct"),
-            ("Mistral Large 2 Instruct - Multilingual, tool use", "mistralai/mistral-large-2-instruct"),
+            ("Mistral Medium 3.5 128B - Best agentic + tool use (0.8s)", "mistralai/mistral-medium-3.5-128b"),
+            ("Nemotron 3 Super 120B - NVIDIA agentic (0.6s)", "nvidia/nemotron-3-super-120b-a12b"),
+            ("GLM-5.1 - Agentic workflows, reasoning", "z-ai/glm-5.1"),
+            ("Mistral Small 4 119B - Fast agents (0.3s)", "mistralai/mistral-small-4-119b-2603"),
             ("Custom model ID", "custom"),
         ],
     },

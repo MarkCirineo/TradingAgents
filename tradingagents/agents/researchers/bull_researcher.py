@@ -21,6 +21,8 @@ Key points to focus on:
 - Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.
 - Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
 
+IMPORTANT: Only reference specific data points, statistics, and figures that appear in the reports below. Do not fabricate analyst estimates, research firm citations, or market statistics that are not provided. If you want to make a claim, ground it in the data from these reports.
+
 Resources available:
 Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}

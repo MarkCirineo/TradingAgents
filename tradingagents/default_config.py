@@ -35,6 +35,11 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # When True, the market analyst pre-fetches all technical indicators
+    # via code instead of relying on the LLM to make multi-step tool calls.
+    # Essential for models with weak tool-calling (e.g. Llama on NVIDIA NIM).
+    # When False, the LLM decides which indicators to fetch autonomously.
+    "prefetch_market_indicators": True,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
@@ -42,6 +47,7 @@ DEFAULT_CONFIG = {
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "social_sentiment": "finnhub",       # Options: finnhub (requires FINNHUB_API_KEY)
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

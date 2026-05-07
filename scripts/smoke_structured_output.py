@@ -39,6 +39,7 @@ PROVIDER_DEFAULTS = {
     "qwen": ("qwen-plus", None),
     "glm": ("glm-5", None),
     "xai": ("grok-4", None),
+    "nvidia": ("mistralai/mistral-medium-3.5-128b", None),
 }
 
 

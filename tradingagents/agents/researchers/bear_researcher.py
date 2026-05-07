@@ -22,6 +22,8 @@ Key points to focus on:
 - Bull Counterpoints: Critically analyze the bull argument with specific data and sound reasoning, exposing weaknesses or over-optimistic assumptions.
 - Engagement: Present your argument in a conversational style, directly engaging with the bull analyst's points and debating effectively rather than simply listing facts.
 
+IMPORTANT: Only reference specific data points, statistics, and figures that appear in the reports below. Do not fabricate analyst estimates, research firm citations, or market statistics that are not provided. If you want to make a claim, ground it in the data from these reports.
+
 Resources available:
 
 Market research report: {market_research_report}

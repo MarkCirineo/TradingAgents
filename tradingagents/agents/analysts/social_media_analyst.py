@@ -1,5 +1,10 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction, get_news
+from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
+    get_language_instruction,
+    get_news,
+    get_social_sentiment,
+)
 from tradingagents.dataflows.config import get_config
 
 
@@ -9,12 +14,27 @@ def create_social_media_analyst(llm):
         instrument_context = build_instrument_context(state["company_of_interest"])
 
         tools = [
+            get_social_sentiment,
             get_news,
         ]
 
         system_message = (
-            "You are a social media and company specific news researcher/analyst tasked with analyzing social media posts, recent company news, and public sentiment for a specific company over the past week. You will be given a company's name your objective is to write a comprehensive long report detailing your analysis, insights, and implications for traders and investors on this company's current state after looking at social media and what people are saying about that company, analyzing sentiment data of what people feel each day about the company, and looking at recent company news. Use the get_news(query, start_date, end_date) tool to search for company-specific news and social media discussions. Try to look at all sources possible from social media to sentiment to news. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
-            + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            "You are a social media sentiment analyst tasked with analyzing public sentiment "
+            "and social media discussions for a specific company. Your primary tool is "
+            "get_social_sentiment(ticker, curr_date, look_back_days) which provides aggregated "
+            "sentiment data from Reddit and Twitter including mention volumes, bullish/bearish "
+            "ratios, and daily sentiment scores. ALWAYS call this tool first.\n\n"
+            "After reviewing the social sentiment data, you may also use get_news(ticker, "
+            "start_date, end_date) to find company-specific news that may explain sentiment "
+            "shifts or unusual mention spikes.\n\n"
+            "Your objective is to write a comprehensive report covering:\n"
+            "1. Overall social media sentiment direction (bullish/bearish/neutral)\n"
+            "2. Mention volume trends (is discussion increasing or decreasing?)\n"
+            "3. Sentiment score trends (is sentiment improving or deteriorating?)\n"
+            "4. Any notable spikes or shifts and their likely catalysts\n"
+            "5. Specific, actionable insights for traders based on retail sentiment\n\n"
+            "Provide data-driven analysis with supporting evidence from the sentiment scores."
+            """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )
 
@@ -55,3 +75,4 @@ def create_social_media_analyst(llm):
         }
 
     return social_media_analyst_node
+
