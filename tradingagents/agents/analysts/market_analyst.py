@@ -21,7 +21,8 @@ _DEFAULT_INDICATORS = [
     "boll", "boll_ub", "boll_lb",  # volatility
     "atr",                      # volatility
     "vwma",                     # volume
-    "close_50_sma", "close_200_sma",  # moving averages
+    "close_10_ema",             # short-term MA (swing trade patterns)
+    "close_50_sma", "close_200_sma",  # medium/long-term moving averages
 ]
 
 

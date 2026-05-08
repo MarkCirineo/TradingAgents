@@ -10,6 +10,8 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -21,8 +23,15 @@ from tradingagents.agents.utils.structured import (
 )
 
 
-def create_portfolio_manager(llm):
+def create_portfolio_manager(llm, config: Optional[Dict[str, Any]] = None):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+
+    # In daemon mode, append the swing-trading entry criteria so the PM
+    # evaluates through the A+ checklist lens.  CLI mode is unchanged.
+    _strategy_overlay = ""
+    if config and config.get("trading_mode") == "daemon":
+        from tradingagents.strategies.swing_playbook import get_entry_criteria_prompt
+        _strategy_overlay = "\n\n" + get_entry_criteria_prompt()
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
@@ -61,7 +70,7 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}{_strategy_overlay}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
@@ -90,3 +99,4 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         }
 
     return portfolio_manager_node
+
