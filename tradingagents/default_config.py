@@ -78,7 +78,6 @@ DEFAULT_CONFIG = {
         "target_risk_per_trade_pct": 0.0035,  # 0.35% risk per trade (default)
         "max_concurrent_positions": 6,
         "min_dollar_volume": 50_000_000,    # $50M avg daily dollar volume
-        "vix_max_entry": 25,                # Don't enter if VIX > 25
     },
     # Ticker screening
     "screening": {

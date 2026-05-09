@@ -18,6 +18,7 @@ from alpaca.data.requests import (
     StockBarsRequest,
     StockSnapshotRequest,
 )
+from alpaca.data.enums import DataFeed
 from alpaca.data.timeframe import TimeFrame
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class AlpacaDataClient:
             attributes ``latest_trade``, ``latest_quote``, ``minute_bar``,
             ``daily_bar``, ``previous_daily_bar``.
         """
-        request = StockSnapshotRequest(symbol_or_symbols=symbols)
+        request = StockSnapshotRequest(symbol_or_symbols=symbols, feed=DataFeed.IEX)
         return self.stock_client.get_stock_snapshot(request)
 
     # -- bars ---------------------------------------------------------------
@@ -157,6 +158,7 @@ class AlpacaDataClient:
             timeframe=timeframe,
             start=pd.Timestamp(start, tz="America/New_York"),
             end=pd.Timestamp(end, tz="America/New_York"),
+            feed=DataFeed.IEX,
         )
         bars = self.stock_client.get_stock_bars(request)
         return bars.df

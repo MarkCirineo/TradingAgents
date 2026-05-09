@@ -35,7 +35,6 @@ trailing MA.
 
 ALREADY VERIFIED BY THE PRE-FILTER (you do not need to check these):
 - Market regime is favorable (SPY above rising 20 MA, 10 MA > 20 MA)
-- VIX is below 25 (not a panic environment)
 - Stock has sufficient liquidity (dollar volume > $50M)
 - Stock has sufficient volatility (ADR > 4%)
 - Stock is outperforming SPY (relative strength in top decile)
@@ -149,5 +148,61 @@ def get_screening_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, A
         "min_price": ss.get("min_price", 5.0),
         "max_price": ss.get("max_price", 500.0),
         "orh_window_minutes": ss.get("orh_window_minutes", 15),
-        "vix_max_entry": cfg.get("guardrails", {}).get("vix_max_entry", 25),
     }
+
+
+# ---------------------------------------------------------------------------
+# VIX regime adjustments (modulates sizing, not a binary gate)
+# ---------------------------------------------------------------------------
+
+# The primary regime filter is SPY MA stacking (check_market_regime).
+# VIX is a secondary modulator that adjusts position sizing and exposure
+# rather than blocking trades entirely.  This aligns with the Qullamaggie
+# methodology: become more selective and smaller in choppy conditions,
+# rather than stopping completely.
+#
+# VIX > 30 is the exception: breakout setups fail almost universally in
+# panic environments, so we pause NEW entries (existing positions are
+# still managed via trailing stops / trims).
+
+_VIX_REGIMES = {
+    # (vix_floor, vix_ceiling): {adjustments}
+    "calm":     {"vix_max": 15,  "risk_pct": 0.0040, "max_positions": 6, "max_exposure_pct": 0.60, "pause_entries": False, "label": "Calm"},
+    "normal":   {"vix_max": 20,  "risk_pct": 0.0035, "max_positions": 6, "max_exposure_pct": 0.60, "pause_entries": False, "label": "Normal"},
+    "elevated": {"vix_max": 30,  "risk_pct": 0.0025, "max_positions": 4, "max_exposure_pct": 0.40, "pause_entries": False, "label": "Elevated"},
+    "panic":    {"vix_max": 999, "risk_pct": 0.0,    "max_positions": 0, "max_exposure_pct": 0.0,  "pause_entries": True,  "label": "Panic"},
+}
+
+
+def get_regime_adjustments(vix_level: float) -> Dict[str, Any]:
+    """Return adjusted trading parameters based on current VIX level.
+
+    These override the static defaults from ``get_sizing_params()`` when
+    the executor calculates position size for a new entry.
+
+    Parameters
+    ----------
+    vix_level : float
+        Current CBOE VIX index level.
+
+    Returns
+    -------
+    dict
+        ``risk_pct`` -- adjusted risk per trade (0 = no new entries).
+        ``max_positions`` -- adjusted max concurrent positions.
+        ``max_exposure_pct`` -- adjusted max portfolio exposure.
+        ``pause_entries`` -- if True, do not open any new positions.
+        ``label`` -- human-readable regime name.
+        ``vix_level`` -- the input VIX value (for logging).
+    """
+    if vix_level > 30:
+        regime = _VIX_REGIMES["panic"]
+    elif vix_level > 20:
+        regime = _VIX_REGIMES["elevated"]
+    elif vix_level < 15:
+        regime = _VIX_REGIMES["calm"]
+    else:
+        regime = _VIX_REGIMES["normal"]
+
+    return {**regime, "vix_level": vix_level}
+
