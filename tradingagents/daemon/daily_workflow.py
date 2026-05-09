@@ -153,10 +153,15 @@ class DailyWorkflow:
     def entry_window(self) -> DayContext:
         """Run LLM pipeline on filtered candidates and execute entries.
 
+        Pipeline analysis runs concurrently via ThreadPoolExecutor for ~4x
+        throughput (configurable via ``screening.max_workers``).  Execution
+        (sizing + ordering) remains sequential because guardrails check
+        portfolio-level state that would race under concurrency.
+
         For each candidate that passed pre-filter:
-        1. Run through TradingAgentsGraph (the LLM analysis pipeline)
-        2. Parse the Portfolio Manager's decision
-        3. If "Buy" → calculate entry/stop prices → execute via Executor
+        1. Run through TradingAgentsGraph (the LLM analysis pipeline) — CONCURRENT
+        2. Parse the Portfolio Manager's decision — main thread
+        3. If "Buy" → calculate entry/stop prices → execute via Executor — main thread
         """
         if self._ctx is None:
             logger.error("entry_window called before pre_market")
@@ -172,6 +177,44 @@ class DailyWorkflow:
 
         self._ensure_components()
 
+        # ----- Phase 1: Concurrent LLM pipeline analysis -------------------
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_workers = self._config.get("screening", {}).get("max_workers", 4)
+        candidates = self._ctx.candidates
+        pipeline_results = {}  # symbol -> decision string or None
+
+        logger.info(
+            "Running LLM pipeline for %d candidates (max_workers=%d)...",
+            len(candidates), max_workers,
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._run_analysis_pipeline, symbol): symbol
+                for symbol in candidates
+            }
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    decision = future.result()
+                    pipeline_results[symbol] = decision
+                    if decision is None:
+                        error_msg = f"{symbol}: LLM pipeline returned no decision"
+                        logger.warning(error_msg)
+                        self._ctx.errors.append(error_msg)
+                except Exception as exc:
+                    error_msg = f"Pipeline error for {symbol}: {exc}"
+                    logger.error(error_msg)
+                    self._ctx.errors.append(error_msg)
+
+        logger.info(
+            "Pipeline batch complete: %d/%d succeeded",
+            sum(1 for v in pipeline_results.values() if v is not None),
+            len(candidates),
+        )
+
+        # ----- Phase 2: Sequential execution (guardrails are portfolio-aware) --
         from tradingagents.execution.executor import Executor, TradeSignal
 
         executor = Executor(
@@ -181,19 +224,13 @@ class DailyWorkflow:
             regime=self._ctx.regime,
         )
 
-        for symbol in self._ctx.candidates:
+        # Iterate in original candidate order for deterministic execution
+        for symbol in candidates:
+            decision = pipeline_results.get(symbol)
+            if decision is None:
+                continue
+
             try:
-                logger.info("Running LLM pipeline for %s...", symbol)
-
-                # Run the full analysis pipeline
-                decision = self._run_analysis_pipeline(symbol)
-
-                if decision is None:
-                    error_msg = f"{symbol}: LLM pipeline returned no decision"
-                    logger.warning(error_msg)
-                    self._ctx.errors.append(error_msg)
-                    continue
-
                 # Parse decision
                 action = self._parse_decision(decision)
                 if action != "buy":
@@ -229,7 +266,7 @@ class DailyWorkflow:
                     logger.info("%s: entry blocked — %s", symbol, result.reason)
 
             except Exception as exc:
-                error_msg = f"Pipeline error for {symbol}: {exc}"
+                error_msg = f"Execution error for {symbol}: {exc}"
                 logger.error(error_msg)
                 self._ctx.errors.append(error_msg)
 

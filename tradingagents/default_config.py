@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
         "watchlist": [],                    # Manual ticker list
         "max_candidates": 20,              # Screener output count
         "max_pipeline_runs": 15,           # How many get full analysis
+        "max_workers": 2,                   # Concurrent pipeline threads (ThreadPoolExecutor)
     },
     # Swing trading strategy parameters (distilled from expert document)
     "swing_strategy": {
