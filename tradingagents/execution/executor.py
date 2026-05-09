@@ -236,8 +236,8 @@ class Executor:
         risk_amount = sizing["risk_amount"]
 
         logger.info(
-            "Executor: %s — %d shares @ $%.2f = $%,.0f "
-            "(risk $%,.0f = %.2f%% of portfolio)",
+            "Executor: %s -- %d shares @ $%.2f = $%.0f "
+            "(risk $%.0f = %.2f%% of portfolio)",
             signal.symbol,
             shares,
             signal.entry_price,
@@ -266,13 +266,24 @@ class Executor:
 
         # 4. Submit bracket order
         try:
+            from alpaca.trading.enums import OrderSide
+
+            # Bracket requires both stop-loss and take-profit.
+            # Set take-profit at entry + 3× risk as a generous ceiling.
+            # Our PositionManager will typically exit before this via
+            # trailing SMA, Day 3 trim, or parabolic extension rules.
+            risk_per_share = signal.entry_price - signal.stop_price
+            take_profit = round(signal.entry_price + 3 * risk_per_share, 2)
+
             order = self._client.submit_bracket_order(
                 symbol=signal.symbol,
                 qty=shares,
-                limit_price=signal.entry_price,
-                stop_price=signal.stop_price,
+                side=OrderSide.BUY,
+                entry_type="market",
+                stop_loss_price=signal.stop_price,
+                take_profit_price=take_profit,
             )
-            order_id = order.id if hasattr(order, "id") else str(order)
+            order_id = str(order.id) if hasattr(order, "id") else str(order)
         except Exception as exc:
             logger.error("Executor: order submission failed for %s: %s", signal.symbol, exc)
             return ExecutionResult(

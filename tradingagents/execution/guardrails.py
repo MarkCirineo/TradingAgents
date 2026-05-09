@@ -212,6 +212,6 @@ class Guardrails:
 
         # All checks passed
         logger.info(
-            "Guardrails APPROVED: %s ($%,.0f)", symbol, proposed_value
+            "Guardrails APPROVED: %s ($%.0f)", symbol, proposed_value
         )
         return GuardrailResult(approved=True, checks=checks)

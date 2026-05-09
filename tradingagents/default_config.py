@@ -11,16 +11,17 @@ DEFAULT_CONFIG = {
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
-    # LLM settings
-    "llm_provider": "openai",
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    # LLM settings -- override via env vars for the daemon (no interactive prompts)
+    # Set LLM_PROVIDER=nvidia, DEEP_THINK_LLM=..., QUICK_THINK_LLM=... in .env
+    "llm_provider": os.getenv("LLM_PROVIDER", "openai"),
+    "deep_think_llm": os.getenv("DEEP_THINK_LLM", "gpt-5.4"),
+    "quick_think_llm": os.getenv("QUICK_THINK_LLM", "gpt-5.4-mini"),
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a
     # provider-specific URL here would leak (e.g. OpenAI's /v1 was previously
     # being forwarded to Gemini, producing malformed request URLs).
-    "backend_url": None,
+    "backend_url": os.getenv("BACKEND_URL", None),
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"

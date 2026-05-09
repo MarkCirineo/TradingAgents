@@ -377,3 +377,75 @@ class TradeDB:
                 (date,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    # -- convenience methods for daemon workflow ----------------------------
+
+    def log_screening(
+        self,
+        date: str,
+        screened: int,
+        passed: int,
+        symbols: list,
+        regime: str = "",
+    ):
+        """Log a batch screening result (convenience wrapper)."""
+        for symbol in symbols:
+            self.log_screening_result(
+                date=date,
+                symbol=symbol,
+                source="hybrid_screener",
+                score=1.0,
+                selected_for_pipeline=True,
+            )
+
+    def record_order(self, symbol: str, side: str, qty: int, order_type: str,
+                     limit_price: float = None, stop_price: float = None,
+                     order_id: str = "", status: str = "submitted", **kwargs):
+        """Record an order (convenience wrapper for log_order)."""
+        self.log_order(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            order_type=order_type,
+            status=status,
+            entry_orl=stop_price,
+            notes=f"limit={limit_price}" if limit_price else None,
+        )
+
+    def record_snapshot(self, date: str, portfolio_value: float, cash: float,
+                        num_positions: int, entries_today: int = 0,
+                        exits_today: int = 0, regime: str = "", **kwargs):
+        """Record a daily snapshot (convenience wrapper)."""
+        invested = portfolio_value - cash
+        self.save_daily_snapshot(
+            date=date,
+            portfolio_value=portfolio_value,
+            cash=cash,
+            invested=invested,
+            daily_pnl=0,  # TODO: compute from previous snapshot
+            daily_pnl_pct=0,
+            positions_count=num_positions,
+            trades_executed=entries_today + exits_today,
+        )
+
+    def increment_day_count(self, symbol: str):
+        """Increment the day counter for a position."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET day_count = day_count + 1 WHERE symbol = ? AND status = 'OPEN'",
+                (symbol,),
+            )
+
+    def mark_trimmed(self, symbol: str):
+        """Mark a position as having been trimmed."""
+        self.update_position(
+            symbol,
+            trimmed=1,
+            trim_date=datetime.now().isoformat(),
+        )
+
+    def update_stop(self, symbol: str, new_stop: float):
+        """Update the tracked stop price for a position."""
+        self.update_position(symbol, entry_orl=new_stop)
+
