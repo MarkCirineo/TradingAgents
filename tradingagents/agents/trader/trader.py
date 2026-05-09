@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage
 
@@ -14,22 +15,34 @@ from tradingagents.agents.utils.structured import (
 )
 
 
-def create_trader(llm):
+def create_trader(llm, config: Optional[Dict[str, Any]] = None):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
+
+    # In daemon mode, append the swing-trading entry criteria to the
+    # system prompt so the LLM evaluates setups through the A+ checklist.
+    # In CLI mode (default), the trader operates exactly as before.
+    _strategy_overlay = ""
+    if config and config.get("trading_mode") == "daemon":
+        from tradingagents.strategies.swing_playbook import get_entry_criteria_prompt
+        _strategy_overlay = "\n\n" + get_entry_criteria_prompt()
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
 
+        system_content = (
+            "You are a trading agent analyzing market data to make investment decisions. "
+            "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
+            "Anchor your reasoning in the analysts' reports and the research plan."
+        )
+        # Append swing strategy overlay when in daemon mode
+        system_content += _strategy_overlay
+
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a trading agent analyzing market data to make investment decisions. "
-                    "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan."
-                ),
+                "content": system_content,
             },
             {
                 "role": "user",
@@ -59,3 +72,4 @@ def create_trader(llm):
         }
 
     return functools.partial(trader_node, name="Trader")
+

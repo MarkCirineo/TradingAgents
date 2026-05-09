@@ -30,6 +30,8 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    "alpaca-py>=0.38.0",
+    "APScheduler>=3.10.0",
 ]
 
 [project.scripts]

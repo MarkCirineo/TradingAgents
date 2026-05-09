@@ -115,6 +115,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            config=self.config,
         )
 
         self.propagator = Propagator()
@@ -326,6 +327,65 @@ class TradingAgentsGraph:
                     chunk["messages"][-1].pretty_print()
                     trace.append(chunk)
             final_state = trace[-1]
+        elif self.config.get("trading_mode") == "daemon":
+            # Daemon mode: use invoke (reliable state) with a callback
+            # that logs each graph node as it executes.
+            import time
+            from langchain_core.callbacks import BaseCallbackHandler
+
+            logger.info("[%s] Daemon mode: starting pipeline with node logging", company_name)
+
+            class _NodeLogger(BaseCallbackHandler):
+                """Lightweight callback that logs graph node transitions."""
+
+                _SKIP = {
+                    "RunnableSequence", "ChannelWrite", "RunnableLambda",
+                    "ChannelRead", "PregelNode", "ChatPromptTemplate",
+                }
+
+                def __init__(self, ticker):
+                    self.ticker = ticker
+                    self.last_time = time.time()
+
+                def on_chain_start(self, serialized, inputs, **kwargs):
+                    name = kwargs.get("name") or (serialized or {}).get("name", "")
+                    if not name or name.startswith("tools_") or name.startswith("Msg Clear"):
+                        return
+                    if name in self._SKIP:
+                        return
+                    now = time.time()
+                    step = now - self.last_time
+                    logger.info("[%s] >> %s (prev step %.0fs)", self.ticker, name, step)
+                    self.last_time = now
+
+            node_logger = _NodeLogger(company_name)
+            pipeline_start = time.time()
+
+            # Merge callback into invoke args
+            run_args = dict(args)
+            # Remove stream_mode — invoke() doesn't use it
+            run_args.pop("stream_mode", None)
+            run_config = run_args.pop("config", {})
+            run_config.setdefault("callbacks", []).append(node_logger)
+            run_args["config"] = run_config
+
+            final_state = self.graph.invoke(init_agent_state, **run_args)
+            total = time.time() - pipeline_start
+            logger.info("[%s] Pipeline total: %.0fs", company_name, total)
+
+            # Log report summaries from the completed state
+            _trunc = lambda s, n=200: (s.replace("\n", " ").strip()[:n] + "...") if s and len(s) > n else (s or "").replace("\n", " ").strip()
+            for label, key in [
+                ("Market",       "market_report"),
+                ("Sentiment",    "sentiment_report"),
+                ("News",         "news_report"),
+                ("Fundamentals", "fundamentals_report"),
+                ("Trader Plan",  "trader_investment_plan"),
+                ("Final Decision", "final_trade_decision"),
+            ]:
+                val = final_state.get(key, "")
+                if val:
+                    logger.info("[%s] %s: %s", company_name, label, _trunc(val))
         else:
             final_state = self.graph.invoke(init_agent_state, **args)
 
