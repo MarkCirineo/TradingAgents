@@ -273,15 +273,21 @@ class AlpacaClient:
             )
 
         if entry_type == "stop":
+            if stop_price is None:
+                raise ValueError("stop_price is required for stop entries")
             kwargs["type"] = OrderType.STOP
             kwargs["stop_price"] = stop_price
             request = StopOrderRequest(**kwargs)
         elif entry_type == "limit":
+            if limit_price is None:
+                raise ValueError("limit_price is required for limit entries")
             kwargs["type"] = OrderType.LIMIT
             kwargs["limit_price"] = limit_price
             request = LimitOrderRequest(**kwargs)
-        else:
+        elif entry_type == "market":
             request = MarketOrderRequest(**kwargs)
+        else:
+            raise ValueError(f"Unknown entry_type '{entry_type}' — expected 'market', 'limit', or 'stop'")
 
         return self._retry(self.client.submit_order, order_data=request)
 
