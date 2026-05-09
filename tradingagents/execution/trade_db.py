@@ -16,8 +16,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = os.path.join(
-    os.path.expanduser("~"), ".tradingagents", "trades.db"
+_DEFAULT_DB_PATH = os.getenv(
+    "TRADINGAGENTS_DB_PATH",
+    os.path.join(os.path.expanduser("~"), ".tradingagents", "trades.db"),
 )
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS orders (
     guardrail_result TEXT,            -- APPROVED / BLOCKED:reason
     entry_orl REAL,                   -- Opening Range Low (initial stop)
     entry_lod REAL,                   -- Low of Day on entry (set after Day 1 close)
+    pipeline_mode TEXT DEFAULT 'full', -- 'full' (LLM) or 'quant' for A/B tracking
     notes TEXT
 );
 
@@ -61,7 +63,8 @@ CREATE TABLE IF NOT EXISTS positions (
     stop_order_id TEXT,               -- Current Alpaca stop order ID
     status TEXT DEFAULT 'OPEN',       -- OPEN / CLOSED
     closed_at TEXT,
-    close_reason TEXT                 -- LOD_STOP / DAY1_RED / TRIM / TRAIL_10SMA / MANUAL / PARABOLIC
+    close_reason TEXT,                -- LOD_STOP / DAY1_RED / TRIM / TRAIL_10SMA / MANUAL / PARABOLIC
+    pipeline_mode TEXT DEFAULT 'full'  -- 'full' (LLM) or 'quant' for A/B tracking
 );
 
 -- Daily portfolio snapshots
@@ -109,10 +112,25 @@ class TradeDB:
         self._init_schema()
 
     def _init_schema(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist and run migrations."""
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Migrations for existing databases
+            self._migrate(conn)
         logger.info("TradeDB initialised at %s", self.db_path)
+
+    def _migrate(self, conn):
+        """Add columns that may be missing in older databases."""
+        migrations = [
+            ("orders", "pipeline_mode", "TEXT DEFAULT 'full'"),
+            ("positions", "pipeline_mode", "TEXT DEFAULT 'full'"),
+        ]
+        for table, column, col_type in migrations:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                logger.info("Migration: added %s.%s", table, column)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     @contextmanager
     def _connect(self):

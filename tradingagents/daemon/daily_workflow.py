@@ -151,17 +151,17 @@ class DailyWorkflow:
     # -- 9:45 AM: Entry window ----------------------------------------------
 
     def entry_window(self) -> DayContext:
-        """Run LLM pipeline on filtered candidates and execute entries.
+        """Analyze candidates and execute entries.
 
-        Pipeline analysis runs concurrently via ThreadPoolExecutor for ~4x
-        throughput (configurable via ``screening.max_workers``).  Execution
-        (sizing + ordering) remains sequential because guardrails check
-        portfolio-level state that would race under concurrency.
+        Supports two pipeline modes (configurable via ``pipeline_mode``):
 
-        For each candidate that passed pre-filter:
-        1. Run through TradingAgentsGraph (the LLM analysis pipeline) — CONCURRENT
-        2. Parse the Portfolio Manager's decision — main thread
-        3. If "Buy" → calculate entry/stop prices → execute via Executor — main thread
+        - **full** — Run multi-agent LLM pipeline concurrently, execute
+          only tickers that receive a "Buy" decision.
+        - **quant** — Skip LLM entirely; every candidate that passed the
+          quantitative pre-filter is automatically a buy.
+
+        In both modes, execution (sizing + ordering) is sequential because
+        guardrails check portfolio-level state.
         """
         if self._ctx is None:
             logger.error("entry_window called before pre_market")
@@ -177,44 +177,16 @@ class DailyWorkflow:
 
         self._ensure_components()
 
-        # ----- Phase 1: Concurrent LLM pipeline analysis -------------------
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        max_workers = self._config.get("screening", {}).get("max_workers", 4)
         candidates = self._ctx.candidates
-        pipeline_results = {}  # symbol -> decision string or None
+        pipeline_mode = self._config.get("pipeline_mode", "full")
 
-        logger.info(
-            "Running LLM pipeline for %d candidates (max_workers=%d)...",
-            len(candidates), max_workers,
-        )
+        # ----- Phase 1: Generate decisions (mode-dependent) ----------------
+        if pipeline_mode == "quant":
+            pipeline_results = self._quant_decisions(candidates)
+        else:
+            pipeline_results = self._llm_pipeline_batch(candidates)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(self._run_analysis_pipeline, symbol): symbol
-                for symbol in candidates
-            }
-            for future in as_completed(futures):
-                symbol = futures[future]
-                try:
-                    decision = future.result()
-                    pipeline_results[symbol] = decision
-                    if decision is None:
-                        error_msg = f"{symbol}: LLM pipeline returned no decision"
-                        logger.warning(error_msg)
-                        self._ctx.errors.append(error_msg)
-                except Exception as exc:
-                    error_msg = f"Pipeline error for {symbol}: {exc}"
-                    logger.error(error_msg)
-                    self._ctx.errors.append(error_msg)
-
-        logger.info(
-            "Pipeline batch complete: %d/%d succeeded",
-            sum(1 for v in pipeline_results.values() if v is not None),
-            len(candidates),
-        )
-
-        # ----- Phase 2: Sequential execution (guardrails are portfolio-aware) --
+        # ----- Phase 2: Sequential execution (shared for both modes) -------
         from tradingagents.execution.executor import Executor, TradeSignal
 
         executor = Executor(
@@ -271,10 +243,73 @@ class DailyWorkflow:
                 self._ctx.errors.append(error_msg)
 
         logger.info(
-            "Entry window complete: %d entries submitted",
-            len(self._ctx.entries_submitted),
+            "Entry window complete: %d entries submitted (mode=%s)",
+            len(self._ctx.entries_submitted), pipeline_mode,
         )
         return self._ctx
+
+    def _quant_decisions(self, candidates: List[str]) -> Dict[str, Optional[str]]:
+        """Generate synthetic 'buy' decisions for all candidates (quant mode).
+
+        In quant mode, passing the pre-filter IS the entry signal.
+        No LLM is invoked. The decision string records the mode for audit.
+        """
+        logger.info(
+            "QUANT MODE: auto-buy for %d candidates (no LLM)", len(candidates),
+        )
+        results = {}
+        for symbol in candidates:
+            results[symbol] = (
+                f"**Rating: Buy**\n"
+                f"QUANT MODE — automatic entry. Passed all quantitative "
+                f"pre-filter criteria (dollar volume, ADR, price range, "
+                f"relative strength, market regime).\n"
+                f"Pipeline mode: quant (no LLM analysis performed)\n"
+            )
+            logger.info("%s: QUANT auto-buy (pre-filter passed)", symbol)
+        return results
+
+    def _llm_pipeline_batch(self, candidates: List[str]) -> Dict[str, Optional[str]]:
+        """Run LLM pipeline concurrently for all candidates (full mode).
+
+        Uses ThreadPoolExecutor for ~2x throughput. Each ticker gets its
+        own TradingAgentsGraph instance for thread safety.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_workers = self._config.get("screening", {}).get("max_workers", 2)
+        pipeline_results = {}
+
+        logger.info(
+            "FULL MODE: running LLM pipeline for %d candidates (max_workers=%d)...",
+            len(candidates), max_workers,
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._run_analysis_pipeline, symbol): symbol
+                for symbol in candidates
+            }
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    decision = future.result()
+                    pipeline_results[symbol] = decision
+                    if decision is None:
+                        error_msg = f"{symbol}: LLM pipeline returned no decision"
+                        logger.warning(error_msg)
+                        self._ctx.errors.append(error_msg)
+                except Exception as exc:
+                    error_msg = f"Pipeline error for {symbol}: {exc}"
+                    logger.error(error_msg)
+                    self._ctx.errors.append(error_msg)
+
+        logger.info(
+            "Pipeline batch complete: %d/%d succeeded",
+            sum(1 for v in pipeline_results.values() if v is not None),
+            len(candidates),
+        )
+        return pipeline_results
 
     # -- 12:00 PM: Midday check ---------------------------------------------
 

@@ -59,6 +59,9 @@ DEFAULT_CONFIG = {
     # -----------------------------------------------------------------------
     # Trading mode: "cli" (default, one-shot analysis) or "daemon" (always-on)
     "trading_mode": "cli",
+    # Pipeline mode: "full" (LLM-gated) or "quant" (quantitative only, skip LLM)
+    # Use for A/B testing: run two daemon instances with different modes.
+    "pipeline_mode": os.getenv("PIPELINE_MODE", "full"),
     # Alpaca configuration
     "alpaca_paper": True,
     # Trading schedule (Eastern Time)

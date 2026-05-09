@@ -111,7 +111,8 @@ class TradingDaemon:
 
         self._workflow = DailyWorkflow(config=self._config)
 
-        print("\n[DAEMON] Running one full trading day cycle...\n")
+        pipeline_mode = self._config.get("pipeline_mode", "full")
+        print(f"\n[DAEMON] Running one full trading day cycle (pipeline_mode={pipeline_mode})...\n")
 
         # Step 1: Pre-market
         print("=" * 60)
