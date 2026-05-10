@@ -313,13 +313,11 @@ class Executor:
                 )
                 self._db.open_position(
                     symbol=signal.symbol,
+                    entry_date=__import__("datetime").date.today().isoformat(),
                     entry_price=signal.entry_price,
-                    shares=shares,
-                    stop_price=signal.stop_price,
-                    position_value=position_value,
-                    risk_amount=risk_amount,
-                    order_id=order_id,
-                    rationale=signal.rationale,
+                    entry_orl=signal.stop_price,
+                    qty=shares,
+                    stop_order_id=order_id,
                 )
             except Exception as exc:
                 logger.warning("DB record failed (order still live): %s", exc)
