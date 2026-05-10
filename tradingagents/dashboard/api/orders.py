@@ -96,9 +96,19 @@ async def export_orders_csv(
 
     output = io.StringIO()
     if orders:
+        # Sanitize values to prevent CSV formula injection
+        safe_orders = []
+        for order in orders:
+            safe = {}
+            for k, v in order.items():
+                if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"):
+                    safe[k] = f"'{v}"
+                else:
+                    safe[k] = v
+            safe_orders.append(safe)
         writer = csv.DictWriter(output, fieldnames=orders[0].keys())
         writer.writeheader()
-        writer.writerows(orders)
+        writer.writerows(safe_orders)
 
     output.seek(0)
     return StreamingResponse(

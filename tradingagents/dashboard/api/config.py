@@ -21,6 +21,8 @@ def _redact(d: dict) -> dict:
     for k, v in d.items():
         if isinstance(v, dict):
             out[k] = _redact(v)
+        elif isinstance(v, list):
+            out[k] = [_redact(item) if isinstance(item, dict) else item for item in v]
         elif any(pat in k.lower() for pat in _SENSITIVE_PATTERNS):
             out[k] = "***" if v else "(not set)"
         else:

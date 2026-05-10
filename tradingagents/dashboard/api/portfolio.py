@@ -110,7 +110,7 @@ async def get_portfolio():
             })
         except Exception as exc:
             logger.warning("Failed to get portfolio from Alpaca: %s", exc)
-            result["source"] = f"error: {exc}"
+            result["source"] = "error: broker_unavailable"
 
     return result
 
@@ -132,7 +132,8 @@ async def get_account():
         account = client.get_account()
         return _serialize_alpaca_obj(account)
     except Exception as exc:
-        raise HTTPException(500, f"Failed to get account: {exc}")
+        logger.error("Failed to get account: %s", exc, exc_info=True)
+        raise HTTPException(500, "Failed to get account")
 
 
 # ---------------------------------------------------------------------------
@@ -321,4 +322,5 @@ async def get_market_clock():
             "source": "alpaca_live",
         }
     except Exception as exc:
-        return {"is_open": False, "source": f"error: {exc}"}
+        logger.warning("Failed to get market clock: %s", exc)
+        return {"is_open": False, "source": "error: clock_unavailable"}

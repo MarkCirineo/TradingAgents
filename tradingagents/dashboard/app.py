@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -141,7 +141,7 @@ async def spa_fallback(path: str):
     """Catch-all route that serves index.html for client-side routing."""
     # Don't catch API or static requests
     if path.startswith("api/") or path.startswith("static/"):
-        return None
+        raise HTTPException(404, "Not found")
     index_path = _STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
