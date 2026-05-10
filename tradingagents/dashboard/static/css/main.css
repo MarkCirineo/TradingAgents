@@ -399,7 +399,7 @@ body::before {
     }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
     :root {
         --space-lg: 16px;
         --space-xl: 24px;
@@ -409,12 +409,44 @@ body::before {
         grid-template-columns: 1fr;
     }
 
-    .topbar__center {
-        display: none;
+    /* Two-row topbar: row 1 = logo + status, row 2 = nav links */
+    .topbar {
+        flex-wrap: wrap;
+        height: auto;
+        padding: var(--space-sm) var(--space-md);
+        gap: var(--space-xs);
+    }
+
+    .topbar__left {
+        flex: 1;
     }
 
     .topbar__right {
         gap: var(--space-sm);
+    }
+
+    .topbar__center {
+        order: 3;
+        width: 100%;
+        justify-content: center;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        gap: var(--space-xs);
+        padding: var(--space-xs) 0 0 0;
+        border-top: 1px solid var(--glass-border);
+        margin-top: var(--space-xs);
+    }
+
+    .topbar__center::-webkit-scrollbar {
+        display: none;
+    }
+
+    .topbar__nav-link {
+        font-size: 0.75rem;
+        padding: var(--space-xs) var(--space-sm);
+        white-space: nowrap;
+        flex-shrink: 0;
     }
 
     .topbar__clock {
@@ -423,11 +455,16 @@ body::before {
 
     .main-content {
         padding: var(--space-md);
+        padding-top: calc(var(--space-md) + 90px); /* account for taller topbar */
     }
 }
 
 @media (max-width: 480px) {
     .topbar__mode {
+        display: none;
+    }
+
+    .topbar__logo-text {
         display: none;
     }
 }
