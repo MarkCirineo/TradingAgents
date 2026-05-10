@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 # Discord embed colour codes (decimal)
 _COLORS = {
     "entry": 0x10B981,      # green
-    "exit": 0xEF4444,       # red
+    "exit": 0x8B5CF6,       # purple (position closed)
     "blocked": 0xF59E0B,    # orange
-    "error": 0xEF4444,      # red
+    "error": 0xEF4444,      # red (something broke)
     "daily_summary": 0x3B82F6,  # blue
     "stop_update": 0x6B7280,    # grey
 }
