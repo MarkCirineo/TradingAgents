@@ -2,8 +2,9 @@
 
 Each function maps to a time slot in the trading day:
 
-    9:00 AM  pre_market()     — screener + regime check + pre-filter
-    9:45 AM  entry_window()   — run LLM pipeline on filtered tickers → execute entries
+    8:00 AM  pre_market()     — screener + regime check + pre-filter
+    8:05 AM  analyze()        — LLM/quant pipeline → store decisions
+    9:45 AM  entry_window()   — fetch ORH/ORL → submit buy-stop orders
    12:00 PM  midday_check()   — Day 3 trims, parabolic extension exits
     3:45 PM  eod_check()      — Day 1 red close, trailing SMA, stop updates
     4:15 PM  post_market()    — daily snapshot, increment day counts, log summary
@@ -35,6 +36,7 @@ class DayContext:
     regime: Dict[str, Any] = field(default_factory=dict)
     regime_favorable: bool = False
     candidates: List[str] = field(default_factory=list)
+    pipeline_decisions: Dict[str, str] = field(default_factory=dict)
     entries_submitted: List[Dict[str, Any]] = field(default_factory=list)
     exits_executed: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -74,7 +76,7 @@ class DailyWorkflow:
             from tradingagents.execution.trade_db import TradeDB
             self._trade_db = TradeDB()
 
-    # -- 9:00 AM: Pre-market ------------------------------------------------
+    # -- 8:00 AM: Pre-market ------------------------------------------------
 
     def pre_market(self) -> DayContext:
         """Screen tickers and check market regime.
@@ -150,20 +152,76 @@ class DailyWorkflow:
 
         return self._ctx
 
-    # -- 9:45 AM: Entry window ----------------------------------------------
+    # -- 8:05 AM: Analyze (LLM pipeline) ------------------------------------
+
+    def analyze(self) -> DayContext:
+        """Run the LLM/quant pipeline on candidates and store decisions.
+
+        This runs BEFORE market open to give the LLM plenty of time.
+        Decisions are stored in ``self._ctx.pipeline_decisions`` and
+        consumed by ``entry_window()`` at 9:45 AM.
+        """
+        if self._ctx is None:
+            logger.error("analyze called before pre_market")
+            return DayContext()
+
+        if not self._ctx.regime_favorable:
+            logger.info("Skipping analysis — regime unfavorable")
+            return self._ctx
+
+        if not self._ctx.candidates:
+            logger.info("Skipping analysis — no candidates")
+            return self._ctx
+
+        self._ensure_components()
+
+        candidates = self._ctx.candidates
+        pipeline_mode = self._config.get("pipeline_mode", "full")
+
+        logger.info(
+            "=== ANALYZE %s (mode=%s, %d candidates) ===",
+            self._ctx.date, pipeline_mode, len(candidates),
+        )
+
+        if pipeline_mode == "quant":
+            pipeline_results = self._quant_decisions(candidates)
+        else:
+            pipeline_results = self._llm_pipeline_batch(candidates)
+
+        # Store decisions for entry_window to consume
+        for symbol in candidates:
+            decision = pipeline_results.get(symbol)
+            if decision is not None:
+                action = self._parse_decision(decision)
+                self._ctx.pipeline_decisions[symbol] = action
+                # Update screening log
+                self._trade_db.log_screening_result(
+                    date=self._ctx.date, symbol=symbol,
+                    source="hybrid_screener", score=1.0,
+                    selected_for_pipeline=True, signal_result=action,
+                )
+                logger.info("%s: pipeline decision = %s", symbol, action)
+
+        buy_count = sum(1 for v in self._ctx.pipeline_decisions.values() if v == "buy")
+        logger.info(
+            "Analysis complete: %d/%d candidates are BUY",
+            buy_count, len(candidates),
+        )
+        return self._ctx
+
+    # -- 9:45 AM: Entry window (ORH/ORL execution) --------------------------
 
     def entry_window(self) -> DayContext:
-        """Analyze candidates and execute entries.
+        """Execute entries using Opening Range breakout logic.
 
-        Supports two pipeline modes (configurable via ``pipeline_mode``):
+        Reads pre-computed decisions from ``analyze()`` and for each
+        "buy" signal:
+          1. Fetches 1-min intraday bars for the opening range window
+          2. Computes ORH (Opening Range High) and ORL (Opening Range Low)
+          3. Submits a buy-stop order at ORH with stop-loss at ORL
 
-        - **full** — Run multi-agent LLM pipeline concurrently, execute
-          only tickers that receive a "Buy" decision.
-        - **quant** — Skip LLM entirely; every candidate that passed the
-          quantitative pre-filter is automatically a buy.
-
-        In both modes, execution (sizing + ordering) is sequential because
-        guardrails check portfolio-level state.
+        The buy-stop only fills if price breaks above ORH during the day.
+        If ORH is never breached, the order expires at market close.
         """
         if self._ctx is None:
             logger.error("entry_window called before pre_market")
@@ -173,22 +231,12 @@ class DailyWorkflow:
             logger.info("Skipping entries — regime unfavorable")
             return self._ctx
 
-        if not self._ctx.candidates:
-            logger.info("Skipping entries — no candidates passed pre-filter")
+        if not self._ctx.pipeline_decisions:
+            logger.info("Skipping entries — no pipeline decisions (analyze() not run?)")
             return self._ctx
 
         self._ensure_components()
 
-        candidates = self._ctx.candidates
-        pipeline_mode = self._config.get("pipeline_mode", "full")
-
-        # ----- Phase 1: Generate decisions (mode-dependent) ----------------
-        if pipeline_mode == "quant":
-            pipeline_results = self._quant_decisions(candidates)
-        else:
-            pipeline_results = self._llm_pipeline_batch(candidates)
-
-        # ----- Phase 2: Sequential execution (shared for both modes) -------
         from tradingagents.execution.executor import Executor, TradeSignal
 
         executor = Executor(
@@ -198,43 +246,50 @@ class DailyWorkflow:
             regime=self._ctx.regime,
         )
 
-        # Iterate in original candidate order for deterministic execution
-        for symbol in candidates:
-            decision = pipeline_results.get(symbol)
-            if decision is None:
-                continue
+        buy_symbols = [
+            s for s, d in self._ctx.pipeline_decisions.items() if d == "buy"
+        ]
+        logger.info(
+            "Entry window: %d BUY decisions to execute via ORH breakout",
+            len(buy_symbols),
+        )
 
+        for symbol in buy_symbols:
             try:
-                # Parse decision
-                action = self._parse_decision(decision)
-                if action != "buy":
-                    logger.info("%s: decision is '%s', skipping", symbol, action)
-                    # Update screening log with final signal
+                # Calculate ORH/ORL from today's opening range
+                orh, orl = self._calculate_orh_orl(symbol)
+                if orh <= 0 or orl <= 0:
+                    logger.warning("%s: invalid ORH/ORL — skipping", symbol)
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result=action,
+                        selected_for_pipeline=True, signal_result="error:orh_orl",
                     )
                     continue
 
-                # Calculate entry/stop from recent data
-                entry_price, stop_price = self._calculate_entry_stop(symbol)
-                if entry_price <= 0 or stop_price <= 0:
-                    logger.warning("%s: invalid entry/stop prices", symbol)
+                if orl >= orh:
+                    logger.warning(
+                        "%s: ORL ($%.2f) >= ORH ($%.2f) — flat opening range, skipping",
+                        symbol, orl, orh,
+                    )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result="error:prices",
+                        selected_for_pipeline=True, signal_result="skip:flat_range",
                     )
                     continue
 
-                # Execute
+                logger.info(
+                    "%s: ORH=$%.2f, ORL=$%.2f — submitting buy-stop",
+                    symbol, orh, orl,
+                )
+
                 signal = TradeSignal(
                     symbol=symbol,
                     action="buy",
-                    entry_price=entry_price,
-                    stop_price=stop_price,
-                    rationale=decision[:500] if isinstance(decision, str) else str(decision)[:500],
+                    entry_price=orh,   # buy-stop trigger at ORH
+                    stop_price=orl,    # stop-loss at ORL
+                    rationale=f"ORH breakout: buy-stop @ ${orh:.2f}, stop @ ${orl:.2f}",
                 )
 
                 result = executor.execute_entry(signal)
@@ -246,11 +301,14 @@ class DailyWorkflow:
                         "stop": result.stop_price,
                         "value": result.position_value,
                     })
-                    logger.info("ENTRY: %s — %d shares @ $%.2f", symbol, result.shares, result.entry_price)
+                    logger.info(
+                        "ENTRY: %s — %d shares, buy-stop @ $%.2f, stop @ $%.2f",
+                        symbol, result.shares, result.entry_price, result.stop_price,
+                    )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result="buy:filled",
+                        selected_for_pipeline=True, signal_result="buy:submitted",
                     )
                 else:
                     logger.info("%s: entry blocked — %s", symbol, result.reason)
@@ -266,8 +324,8 @@ class DailyWorkflow:
                 self._ctx.errors.append(error_msg)
 
         logger.info(
-            "Entry window complete: %d entries submitted (mode=%s)",
-            len(self._ctx.entries_submitted), pipeline_mode,
+            "Entry window complete: %d entries submitted",
+            len(self._ctx.entries_submitted),
         )
         return self._ctx
 
@@ -501,12 +559,61 @@ class DailyWorkflow:
             return "sell"
         return "hold"
 
-    def _calculate_entry_stop(self, symbol: str) -> tuple:
-        """Calculate entry and stop prices from recent price data.
+    def _calculate_orh_orl(self, symbol: str) -> tuple:
+        """Calculate Opening Range High and Low from intraday bars.
 
-        Entry = current price (market entry)
-        Stop = Opening Range Low or recent swing low
+        Fetches 1-min bars for the first ``orh_window_minutes`` after
+        market open (default: 9:30–9:45 ET).
+
+        Returns
+        -------
+        tuple
+            (ORH, ORL) — highest high and lowest low in the opening range.
+            Returns (0.0, 0.0) if data is unavailable.
         """
+        try:
+            from tradingagents.strategies.swing_playbook import get_screening_params
+
+            params = get_screening_params(self._config)
+            window_min = params.get("orh_window_minutes", 15)
+
+            # Build today's opening range window
+            from datetime import datetime as dt
+            import pytz
+            et = pytz.timezone("US/Eastern")
+            today = dt.now(et).date()
+            market_open = et.localize(dt.combine(today, dt.strptime("09:30", "%H:%M").time()))
+            window_end = market_open + timedelta(minutes=window_min)
+
+            bars = self._data_client.get_intraday_bars(
+                symbol=symbol,
+                start=market_open,
+                end=window_end,
+            )
+
+            if bars.empty:
+                logger.warning(
+                    "%s: no intraday bars for opening range — "
+                    "falling back to previous day high/low",
+                    symbol,
+                )
+                return self._fallback_entry_stop(symbol)
+
+            orh = float(bars["high"].max())
+            orl = float(bars["low"].min())
+
+            logger.info(
+                "%s: Opening Range (first %d min): ORH=$%.2f, ORL=$%.2f",
+                symbol, window_min, orh, orl,
+            )
+            return (round(orh, 2), round(orl, 2))
+
+        except Exception as exc:
+            logger.warning("Failed to calculate ORH/ORL for %s: %s", symbol, exc)
+            return self._fallback_entry_stop(symbol)
+
+    def _fallback_entry_stop(self, symbol: str) -> tuple:
+        """Fallback: use previous day's high/low when intraday data is unavailable."""
         try:
             bars = self._data_client.get_bars(symbol, lookback_days=5)
             import pandas as pd
@@ -516,20 +623,16 @@ class DailyWorkflow:
             if bars.empty:
                 return (0.0, 0.0)
 
-            # Entry = latest close (will be a market order near this level)
-            entry = float(bars["close"].iloc[-1])
-
-            # Stop = lowest low of last 2 bars (approximates ORL/LOD)
+            # Use last day's high as entry, last 2 days' low as stop
+            entry = float(bars["high"].iloc[-1])
             stop = float(bars["low"].tail(2).min())
 
-            # Sanity: stop must be below entry
             if stop >= entry:
-                stop = entry * 0.97  # fallback: 3% below entry
+                stop = entry * 0.97
 
             return (round(entry, 2), round(stop, 2))
-
         except Exception as exc:
-            logger.warning("Failed to calculate entry/stop for %s: %s", symbol, exc)
+            logger.warning("Fallback entry/stop failed for %s: %s", symbol, exc)
             return (0.0, 0.0)
 
     def _execute_exit(self, action):

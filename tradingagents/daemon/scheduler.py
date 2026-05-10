@@ -8,8 +8,9 @@ The scheduler creates cron jobs for each trading time slot and runs
 the ``DailyWorkflow`` at those times on market days.
 
 Schedule (Eastern Time):
-    9:00 AM   pre_market       — screener + regime check
-    9:45 AM   entry_window     — LLM pipeline → executor
+    8:00 AM   pre_market       — screener + regime check
+    8:05 AM   analyze          — LLM/quant pipeline → store decisions
+    9:45 AM   entry_window     — fetch ORH/ORL → submit buy-stop orders
    12:00 PM   midday_check     — Day 3 trims, parabolic exits
     3:45 PM   eod_check        — Day 1 red close, trailing SMA, stops
     4:15 PM   post_market      — daily snapshot + summary
@@ -55,7 +56,8 @@ class TradingDaemon:
 
         # Parse schedule times (format: "HH:MM")
         jobs = [
-            ("pre_market",   schedule.get("pre_market", "09:00"),   self._workflow.pre_market),
+            ("pre_market",   schedule.get("pre_market", "08:00"),   self._workflow.pre_market),
+            ("analyze",      schedule.get("analyze", "08:05"),      self._workflow.analyze),
             ("entry_window", schedule.get("entry_window", "09:45"), self._workflow.entry_window),
             ("midday_check", schedule.get("midday_check", "12:00"), self._workflow.midday_check),
             ("eod_check",    schedule.get("eod_check", "15:45"),    self._workflow.eod_check),
@@ -116,7 +118,7 @@ class TradingDaemon:
 
         # Step 1: Pre-market
         print("=" * 60)
-        print("STEP 1/5: Pre-Market (screener + regime)")
+        print("STEP 1/6: Pre-Market (screener + regime)")
         print("=" * 60)
         ctx = self._workflow.pre_market()
         print(f"  Regime: {ctx.regime.get('label', 'Unknown')} (favorable={ctx.regime_favorable})")
@@ -127,35 +129,45 @@ class TradingDaemon:
             print("[!] Regime unfavorable -- skipping entries")
             print()
 
-        # Step 2: Entry window
+        # Step 2: Analyze (LLM/quant pipeline)
         print("=" * 60)
-        print("STEP 2/5: Entry Window (LLM pipeline -> executor)")
+        print("STEP 2/6: Analyze (LLM/quant pipeline)")
+        print("=" * 60)
+        ctx = self._workflow.analyze()
+        buy_count = sum(1 for v in ctx.pipeline_decisions.values() if v == "buy")
+        print(f"  Decisions: {dict(ctx.pipeline_decisions)}")
+        print(f"  Buy signals: {buy_count}/{len(ctx.pipeline_decisions)}")
+        print()
+
+        # Step 3: Entry window (ORH/ORL)
+        print("=" * 60)
+        print("STEP 3/6: Entry Window (ORH/ORL buy-stop orders)")
         print("=" * 60)
         ctx = self._workflow.entry_window()
         print(f"  Entries submitted: {len(ctx.entries_submitted)}")
         for e in ctx.entries_submitted:
-            print(f"    {e['symbol']}: {e['shares']} shares @ ${e['entry']:.2f}")
+            print(f"    {e['symbol']}: {e['shares']} shares, buy-stop @ ${e['entry']:.2f}, stop @ ${e['stop']:.2f}")
         print()
 
-        # Step 3: Midday check
+        # Step 4: Midday check
         print("=" * 60)
-        print("STEP 3/5: Midday Check (trims + parabolic exits)")
+        print("STEP 4/6: Midday Check (trims + parabolic exits)")
         print("=" * 60)
         ctx = self._workflow.midday_check()
         print(f"  Exits so far: {len(ctx.exits_executed)}")
         print()
 
-        # Step 4: EOD check
+        # Step 5: EOD check
         print("=" * 60)
-        print("STEP 4/5: EOD Check (Day 1 red close, trailing SMA)")
+        print("STEP 5/6: EOD Check (Day 1 red close, trailing SMA)")
         print("=" * 60)
         ctx = self._workflow.eod_check()
         print(f"  Total exits: {len(ctx.exits_executed)}")
         print()
 
-        # Step 5: Post-market
+        # Step 6: Post-market
         print("=" * 60)
-        print("STEP 5/5: Post-Market Summary")
+        print("STEP 6/6: Post-Market Summary")
         print("=" * 60)
         ctx = self._workflow.post_market()
         print()

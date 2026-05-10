@@ -267,12 +267,13 @@ class Executor:
                 reason=f"guardrail: {guardrail.reason}",
             )
 
-        # 4. Submit bracket order
+        # 4. Submit bracket order (buy-stop at ORH)
         try:
             from alpaca.trading.enums import OrderSide
 
-            # Bracket requires both stop-loss and take-profit.
-            # Set take-profit at entry + 3× risk as a generous ceiling.
+            # Buy-stop at ORH: order only fills if price breaks above ORH.
+            # Stop-loss child at ORL protects downside.
+            # Take-profit at entry + 3× risk as a generous ceiling.
             # Our PositionManager will typically exit before this via
             # trailing SMA, Day 3 trim, or parabolic extension rules.
             risk_per_share = signal.entry_price - signal.stop_price
@@ -282,8 +283,9 @@ class Executor:
                 symbol=signal.symbol,
                 qty=shares,
                 side=OrderSide.BUY,
-                entry_type="market",
-                stop_loss_price=signal.stop_price,
+                entry_type="stop",
+                stop_price=signal.entry_price,    # ORH = trigger price
+                stop_loss_price=signal.stop_price, # ORL = stop-loss
                 take_profit_price=take_profit,
             )
             order_id = str(order.id) if hasattr(order, "id") else str(order)
