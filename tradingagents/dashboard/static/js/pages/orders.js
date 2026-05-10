@@ -1,8 +1,8 @@
 /**
  * TradingAgents Dashboard — Orders Page
  *
- * Full order history with filtering, bracket expansion,
- * and CSV export. Shows summary stats at the top.
+ * Shows order history from the local SQLite database (our internal log).
+ * For live Alpaca orders with bracket legs, see the Alpaca page.
  */
 
 const OrdersPage = {
@@ -19,7 +19,7 @@ const OrdersPage = {
         title.textContent = 'Orders';
         const subtitle = document.createElement('div');
         subtitle.className = 'page-header__subtitle';
-        subtitle.textContent = 'Complete order history with bracket leg details';
+        subtitle.textContent = 'Internal order log from the trading daemon';
         header.appendChild(title);
         header.appendChild(subtitle);
         container.appendChild(header);
@@ -68,13 +68,10 @@ const OrdersPage = {
 
     destroy() {},
 
-    // ── Filter Bar ────────────────────────────────────────────
-
     _buildFilterBar() {
         const bar = document.createElement('div');
         bar.className = 'filter-bar';
 
-        // Status filter
         const statusSelect = document.createElement('select');
         statusSelect.className = 'filter-select';
         statusSelect.id = 'filter-status';
@@ -96,7 +93,6 @@ const OrdersPage = {
         });
         bar.appendChild(statusSelect);
 
-        // Symbol search
         const symbolInput = document.createElement('input');
         symbolInput.className = 'filter-input';
         symbolInput.id = 'filter-symbol';
@@ -112,7 +108,6 @@ const OrdersPage = {
         });
         bar.appendChild(symbolInput);
 
-        // CSV export button
         const exportBtn = document.createElement('button');
         exportBtn.className = 'chart-controls__btn';
         exportBtn.textContent = '\u{1F4E5} Export CSV';
@@ -126,8 +121,6 @@ const OrdersPage = {
 
         return bar;
     },
-
-    // ── Stats ─────────────────────────────────────────────────
 
     _updateStats(summary) {
         const row = document.getElementById('orders-stats-row');
@@ -165,8 +158,6 @@ const OrdersPage = {
         });
     },
 
-    // ── Table ─────────────────────────────────────────────────
-
     _updateTable(orders) {
         const container = document.getElementById('orders-table');
         if (!container) return;
@@ -179,32 +170,27 @@ const OrdersPage = {
 
         const headers = ['Time', 'Symbol', 'Side', 'Qty', 'Type', 'Price', 'Signal', 'Status', 'Guardrail'];
         const rows = orders.map(o => {
-            // Format timestamp
             const time = o.submitted_at ? new Date(o.submitted_at).toLocaleDateString('en-US', {
                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
             }) : '\u2014';
 
-            // Side badge
             const sideBadge = Components.badge(
                 o.side || '\u2014',
                 o.side === 'BUY' ? 'success' : 'danger'
             );
 
-            // Status badge
             let statusVariant = 'neutral';
             if (o.status === 'FILLED') statusVariant = 'success';
             else if (o.status === 'CANCELLED') statusVariant = 'danger';
             else if (o.status === 'SUBMITTED') statusVariant = 'warning';
             const statusBadge = Components.badge(o.status || '\u2014', statusVariant);
 
-            // Signal badge
             let signalVariant = 'neutral';
             if (o.signal === 'Buy' || o.signal === 'Overweight') signalVariant = 'success';
             else if (o.signal === 'Sell' || o.signal === 'Underweight') signalVariant = 'danger';
             else if (o.signal === 'Hold') signalVariant = 'warning';
             const signalBadge = o.signal ? Components.badge(o.signal, signalVariant) : '\u2014';
 
-            // Guardrail
             const guardrail = o.guardrail_result || '\u2014';
             const grEl = document.createElement('span');
             grEl.className = guardrail.startsWith('APPROVED') ? 'text-success' : guardrail.startsWith('BLOCKED') ? 'text-danger' : '';

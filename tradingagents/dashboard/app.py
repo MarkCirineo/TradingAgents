@@ -106,12 +106,14 @@ from tradingagents.dashboard.api.stream import router as stream_router
 from tradingagents.dashboard.api.snapshots import router as snapshots_router
 from tradingagents.dashboard.api.screening import router as screening_router
 from tradingagents.dashboard.api.orders import router as orders_router
+from tradingagents.dashboard.api.alpaca_orders import router as alpaca_orders_router
 
 app.include_router(portfolio_router, prefix="/api", tags=["portfolio"])
 app.include_router(stream_router, prefix="/api", tags=["stream"])
 app.include_router(snapshots_router, prefix="/api", tags=["snapshots"])
 app.include_router(screening_router, prefix="/api", tags=["screening"])
 app.include_router(orders_router, prefix="/api", tags=["orders"])
+app.include_router(alpaca_orders_router, prefix="/api", tags=["alpaca-orders"])
 
 # ---------------------------------------------------------------------------
 # Static files — serve the SPA

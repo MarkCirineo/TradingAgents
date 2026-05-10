@@ -74,6 +74,12 @@ const API = {
         return this._fetch(`/api/orders/${encodeURIComponent(orderId)}`);
     },
 
+    /** Get orders directly from Alpaca API with bracket leg expansion. */
+    async getAlpacaOrders(params = {}) {
+        const query = new URLSearchParams(params).toString();
+        return this._fetch(`/api/alpaca/orders${query ? '?' + query : ''}`);
+    },
+
     // ── Snapshots ─────────────────────────────────────────────
 
     /** Get daily portfolio snapshots. */

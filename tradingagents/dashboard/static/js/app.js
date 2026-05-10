@@ -24,6 +24,7 @@ const App = {
             'dashboard': DashboardPage,
             'orders': OrdersPage,
             'positions': PositionPage,
+            'alpaca': AlpacaPage,
         };
 
         // Intercept nav link clicks for client-side routing

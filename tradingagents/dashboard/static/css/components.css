@@ -684,6 +684,196 @@
     color: var(--text-muted);
 }
 
+/* ─── Raw JSON Display ─────────────────────────────────────── */
+.raw-json {
+    background: var(--bg-elevated);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+    margin-top: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    overflow-x: auto;
+    max-height: 500px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.5;
+}
+
+/* ─── Order Row (Alpaca orders) ────────────────────────────── */
+.order-row {
+    border-bottom: 1px solid var(--glass-border);
+}
+
+.order-row:last-child {
+    border-bottom: none;
+}
+
+.order-row__main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-md) var(--space-sm);
+    gap: var(--space-md);
+    transition: background var(--transition-fast);
+}
+
+.order-row__main:hover {
+    background: var(--bg-elevated);
+}
+
+.order-row__left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-width: 200px;
+}
+
+.order-row__symbol {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    min-width: 60px;
+}
+
+.order-row__type {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.order-row__center {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex: 1;
+}
+
+.order-row__qty {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.order-row__price {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.order-row__right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.order-row__time {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    min-width: 100px;
+    text-align: right;
+}
+
+/* ─── Bracket Legs (expanded) ──────────────────────────────── */
+.order-row__legs {
+    background: var(--bg-elevated);
+    border-top: 1px solid var(--glass-border);
+    padding: var(--space-md);
+    margin: 0 var(--space-sm);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.bracket-summary {
+    display: flex;
+    gap: var(--space-lg);
+    margin-bottom: var(--space-md);
+    flex-wrap: wrap;
+}
+
+.bracket-summary__item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+}
+
+.bracket-summary__item--stop {
+    background: var(--danger-dim);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.bracket-summary__item--tp {
+    background: var(--success-dim);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.bracket-summary__label {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.bracket-summary__price {
+    font-weight: 800;
+    font-size: 1rem;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.bracket-summary__status {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.order-leg {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-xs) 0;
+    font-size: 0.8rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.order-leg:last-child {
+    border-bottom: none;
+}
+
+.order-leg__type {
+    font-weight: 600;
+    font-family: var(--font-mono);
+    min-width: 80px;
+}
+
+.order-leg__side {
+    color: var(--text-muted);
+    min-width: 40px;
+}
+
+.order-leg__qty {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.order-leg__price {
+    font-weight: 600;
+    font-family: var(--font-mono);
+}
+
+/* ─── Filter Source Indicator ──────────────────────────────── */
+.filter-source {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
 /* ─── Scrollbar ────────────────────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;

@@ -92,6 +92,9 @@ body {
     line-height: 1.5;
     min-height: 100vh;
     overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    padding-top: var(--topbar-height);
 }
 
 /* Subtle grid background pattern */
@@ -278,10 +281,10 @@ body::before {
 
 /* ─── Main Content ─────────────────────────────────────────── */
 .main-content {
-    margin-top: var(--topbar-height);
-    min-height: calc(100vh - var(--topbar-height) - var(--footer-height));
+    flex: 1;
     padding: var(--space-lg);
     max-width: var(--content-max-width);
+    width: 100%;
     margin-left: auto;
     margin-right: auto;
     position: relative;
