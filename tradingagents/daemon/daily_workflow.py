@@ -207,12 +207,23 @@ class DailyWorkflow:
                 action = self._parse_decision(decision)
                 if action != "buy":
                     logger.info("%s: decision is '%s', skipping", symbol, action)
+                    # Update screening log with final signal
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result=action,
+                    )
                     continue
 
                 # Calculate entry/stop from recent data
                 entry_price, stop_price = self._calculate_entry_stop(symbol)
                 if entry_price <= 0 or stop_price <= 0:
                     logger.warning("%s: invalid entry/stop prices", symbol)
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="error:prices",
+                    )
                     continue
 
                 # Execute
@@ -234,8 +245,18 @@ class DailyWorkflow:
                         "value": result.position_value,
                     })
                     logger.info("ENTRY: %s — %d shares @ $%.2f", symbol, result.shares, result.entry_price)
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="buy:filled",
+                    )
                 else:
                     logger.info("%s: entry blocked — %s", symbol, result.reason)
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result=f"blocked:{result.reason[:50]}",
+                    )
 
             except Exception as exc:
                 error_msg = f"Execution error for {symbol}: {exc}"
