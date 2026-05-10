@@ -66,12 +66,11 @@ DEFAULT_CONFIG = {
     "alpaca_paper": True,
     # Trading schedule (Eastern Time)
     "trading_schedule": {
-        "pre_market_scan": "06:30",
-        "pipeline_batch": "06:35",
-        "orh_entry": "09:45",
+        "pre_market": "09:00",
+        "entry_window": "09:45",
         "midday_check": "12:00",
-        "eod_review": "16:00",
-        "post_market_summary": "16:30",
+        "eod_check": "15:45",
+        "post_market": "16:15",
     },
     # Guardrails -- pre-trade safety checks
     "guardrails": {
@@ -85,11 +84,11 @@ DEFAULT_CONFIG = {
     },
     # Ticker screening
     "screening": {
-        "source": "alpaca",                 # alpaca, hybrid, watchlist
+        "source": os.getenv("SCREENING_SOURCE", "alpaca"),  # alpaca, hybrid, watchlist
         "watchlist": [],                    # Manual ticker list
-        "max_candidates": 20,              # Screener output count
-        "max_pipeline_runs": 15,           # How many get full analysis
-        "max_workers": 2,                   # Concurrent pipeline threads (ThreadPoolExecutor)
+        "max_candidates": int(os.getenv("MAX_CANDIDATES", "35")),
+        "max_pipeline_runs": int(os.getenv("MAX_PIPELINE_RUNS", "15")),
+        "max_workers": int(os.getenv("MAX_WORKERS", "2")),
     },
     # Swing trading strategy parameters (distilled from expert document)
     "swing_strategy": {

@@ -26,6 +26,7 @@ const App = {
             'positions': PositionPage,
             'alpaca': AlpacaPage,
             'compare': ABPage,
+            'config': ConfigPage,
         };
 
         // Intercept nav link clicks for client-side routing
