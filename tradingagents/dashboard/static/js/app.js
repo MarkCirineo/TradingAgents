@@ -22,7 +22,8 @@ const App = {
         // Register page modules
         this._pages = {
             'dashboard': DashboardPage,
-            // Phase 3+: orders, position detail, alpaca, compare, config
+            'orders': OrdersPage,
+            'positions': PositionPage,
         };
 
         // Intercept nav link clicks for client-side routing

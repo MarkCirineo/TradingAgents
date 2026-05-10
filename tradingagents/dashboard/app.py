@@ -105,11 +105,13 @@ from tradingagents.dashboard.api.portfolio import router as portfolio_router
 from tradingagents.dashboard.api.stream import router as stream_router
 from tradingagents.dashboard.api.snapshots import router as snapshots_router
 from tradingagents.dashboard.api.screening import router as screening_router
+from tradingagents.dashboard.api.orders import router as orders_router
 
 app.include_router(portfolio_router, prefix="/api", tags=["portfolio"])
 app.include_router(stream_router, prefix="/api", tags=["stream"])
 app.include_router(snapshots_router, prefix="/api", tags=["snapshots"])
 app.include_router(screening_router, prefix="/api", tags=["screening"])
+app.include_router(orders_router, prefix="/api", tags=["orders"])
 
 # ---------------------------------------------------------------------------
 # Static files — serve the SPA
