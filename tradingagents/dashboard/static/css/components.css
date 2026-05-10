@@ -956,3 +956,62 @@
 ::-webkit-scrollbar-thumb:hover {
     background: rgba(59, 130, 246, 0.3);
 }
+
+/* ─── Log Viewer ───────────────────────────────────────────── */
+.log-tab {
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    border: 1px solid var(--glass-border);
+    border-bottom: none;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    padding: var(--space-xs) var(--space-md);
+    font-size: 0.8rem;
+    font-family: var(--font-family);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.log-tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
+}
+
+.log-tab--active {
+    color: var(--primary);
+    background: var(--bg-card-hover);
+    border-color: var(--primary);
+    border-bottom: 1px solid var(--bg-card-hover);
+}
+
+.log-output {
+    background: rgba(6, 10, 20, 0.9);
+    border: 1px solid var(--glass-border);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) var(--radius-sm);
+    padding: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    overflow: auto;
+    max-height: calc(100vh - 280px);
+    white-space: pre;
+    tab-size: 4;
+}
+
+.log-line {
+    color: var(--text-muted);
+}
+
+.log-line--info {
+    color: var(--text-secondary);
+}
+
+.log-line--warning {
+    color: var(--warning);
+}
+
+.log-line--error {
+    color: var(--danger);
+    font-weight: 500;
+}

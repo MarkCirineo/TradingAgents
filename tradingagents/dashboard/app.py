@@ -109,6 +109,7 @@ from tradingagents.dashboard.api.orders import router as orders_router
 from tradingagents.dashboard.api.alpaca_orders import router as alpaca_orders_router
 from tradingagents.dashboard.api.comparison import router as comparison_router
 from tradingagents.dashboard.api.config import router as config_router
+from tradingagents.dashboard.api.logs import router as logs_router
 
 app.include_router(portfolio_router, prefix="/api", tags=["portfolio"])
 app.include_router(stream_router, prefix="/api", tags=["stream"])
@@ -118,6 +119,7 @@ app.include_router(orders_router, prefix="/api", tags=["orders"])
 app.include_router(alpaca_orders_router, prefix="/api", tags=["alpaca-orders"])
 app.include_router(comparison_router, prefix="/api", tags=["comparison"])
 app.include_router(config_router, prefix="/api", tags=["config"])
+app.include_router(logs_router, prefix="/api", tags=["logs"])
 
 # ---------------------------------------------------------------------------
 # Static files — serve the SPA
