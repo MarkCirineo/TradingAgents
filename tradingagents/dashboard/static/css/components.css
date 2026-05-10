@@ -874,6 +874,70 @@
     margin-left: auto;
 }
 
+/* ─── A/B Comparison ───────────────────────────────────────── */
+.ab-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-xl);
+    margin-bottom: var(--space-xl);
+    padding: var(--space-lg);
+    background: var(--bg-card);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-lg);
+}
+
+.ab-instance {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.ab-instance__name {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.ab-vs {
+    font-size: 1.5rem;
+    font-weight: 900;
+    color: var(--text-muted);
+    opacity: 0.4;
+    letter-spacing: 0.1em;
+}
+
+.ab-compare-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-sm) 0;
+}
+
+.ab-compare-value {
+    flex: 1;
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.ab-compare-divider {
+    width: 2px;
+    height: 32px;
+    background: var(--glass-border);
+    flex-shrink: 0;
+}
+
+.ab-winner {
+    text-align: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-top: var(--space-sm);
+    opacity: 0.8;
+}
+
 /* ─── Scrollbar ────────────────────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;

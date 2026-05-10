@@ -115,6 +115,11 @@ const API = {
     async getConfig() {
         return this._fetch('/api/config');
     },
+
+    /** Get A/B comparison data (local vs peer). */
+    async getComparison() {
+        return this._fetch('/api/comparison');
+    },
 };
 
 // Make globally available
