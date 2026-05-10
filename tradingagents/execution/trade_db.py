@@ -209,7 +209,39 @@ class TradeDB:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_all_orders(
+        self,
+        status: Optional[str] = None,
+        symbol: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return orders with optional filtering, most recent first."""
+        query = "SELECT * FROM orders WHERE 1=1"
+        params: list = []
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol.upper())
+        query += " ORDER BY submitted_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+
     # -- positions ----------------------------------------------------------
+
+    def get_closed_positions(self, limit: int = 50) -> list[dict]:
+        """Return closed positions, most recently closed first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE status = 'CLOSED' "
+                "ORDER BY closed_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
 
     def open_position(
         self,
