@@ -164,11 +164,12 @@ def main():
     )
 
     port = int(os.environ.get("DASHBOARD_PORT", "8050"))
-    logger.info("Starting TradingAgents Dashboard on port %d", port)
+    host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    logger.info("Starting TradingAgents Dashboard on %s:%d", host, port)
 
     uvicorn.run(
         "tradingagents.dashboard.app:app",
-        host="0.0.0.0",
+        host=host,
         port=port,
         reload=False,
         log_level="info",
