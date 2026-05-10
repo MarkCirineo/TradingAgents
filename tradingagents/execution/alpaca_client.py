@@ -314,6 +314,33 @@ class AlpacaClient:
         """Cancel all open orders."""
         return self._retry(self.client.cancel_orders)
 
+    # -- orders: nested (bracket leg visibility) ----------------------------
+
+    def get_orders_nested(
+        self,
+        status: QueryOrderStatus = QueryOrderStatus.ALL,
+        symbols: Optional[list[str]] = None,
+    ):
+        """Return orders with bracket child legs expanded.
+
+        The ``nested=True`` parameter tells Alpaca to include the
+        ``legs`` list on bracket orders, containing the stop-loss
+        and take-profit child orders with their prices.  This is
+        the data that Alpaca's own dashboard UI *doesn't* show.
+
+        For bracket orders, ``order.legs`` is a list where:
+        - ``legs[0]`` → take-profit order (has ``limit_price``)
+        - ``legs[1]`` → stop-loss order (has ``stop_price``)
+        """
+        request = GetOrdersRequest(status=status, symbols=symbols, nested=True)
+        return self._retry(self.client.get_orders, filter=request)
+
+    def get_order_nested(self, order_id: str):
+        """Return a single order with bracket legs expanded."""
+        return self._retry(
+            self.client.get_order_by_id, order_id, nested=True
+        )
+
     # -- orders: modification -----------------------------------------------
 
     def replace_stop_order(
