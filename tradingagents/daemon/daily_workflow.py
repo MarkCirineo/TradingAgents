@@ -194,12 +194,15 @@ class DailyWorkflow:
             if decision is not None:
                 action = self._parse_decision(decision)
                 self._ctx.pipeline_decisions[symbol] = action
-                # Update screening log
-                self._trade_db.log_screening_result(
-                    date=self._ctx.date, symbol=symbol,
-                    source="hybrid_screener", score=1.0,
-                    selected_for_pipeline=True, signal_result=action,
-                )
+                # Update screening log (best-effort — don't abort loop)
+                try:
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result=action,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to log screening result for %s: %s", symbol, exc)
                 logger.info("%s: pipeline decision = %s", symbol, action)
 
         buy_count = sum(1 for v in self._ctx.pipeline_decisions.values() if v == "buy")
