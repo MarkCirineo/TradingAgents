@@ -7,6 +7,7 @@ to enable side-by-side comparison of execution modes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -105,10 +106,13 @@ async def get_comparison():
     peer_data = {"label": "Peer Instance", "mode": "unknown", "available": False}
 
     if PEER_URL:
-        peer_portfolio = _fetch_peer("/portfolio")
-        peer_positions = _fetch_peer("/positions")
-        peer_orders = _fetch_peer("/orders")
-        peer_snapshots = _fetch_peer("/snapshots?days=30")
+        # Fetch all peer endpoints concurrently without blocking the event loop
+        peer_portfolio, peer_positions, peer_orders, peer_snapshots = await asyncio.gather(
+            asyncio.to_thread(_fetch_peer, "/portfolio"),
+            asyncio.to_thread(_fetch_peer, "/positions"),
+            asyncio.to_thread(_fetch_peer, "/orders"),
+            asyncio.to_thread(_fetch_peer, "/snapshots?days=30"),
+        )
 
         if peer_portfolio:
             peer_data["available"] = True

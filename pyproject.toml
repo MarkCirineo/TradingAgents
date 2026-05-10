@@ -34,7 +34,7 @@ dependencies = [
     "APScheduler>=3.10.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.scripts]

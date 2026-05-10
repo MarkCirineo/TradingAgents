@@ -133,4 +133,4 @@ async def get_alpaca_orders(
         }
     except Exception as exc:
         logger.error("Failed to fetch Alpaca orders: %s", exc, exc_info=True)
-        raise HTTPException(500, f"Failed to fetch orders: {exc}")
+        raise HTTPException(500, "Failed to fetch orders")
