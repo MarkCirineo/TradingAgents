@@ -22,6 +22,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from tradingagents.notifications import notify
+
 logger = logging.getLogger(__name__)
 
 
@@ -252,6 +254,7 @@ class Executor:
             logger.warning(
                 "Executor BLOCKED %s: %s", signal.symbol, guardrail.reason
             )
+            notify("blocked", symbol=signal.symbol, reason=guardrail.reason)
             return ExecutionResult(
                 success=False,
                 symbol=signal.symbol,
@@ -325,6 +328,17 @@ class Executor:
         logger.info(
             "Executor: FILLED %s — %d shares @ $%.2f, stop @ $%.2f, order=%s",
             signal.symbol, shares, signal.entry_price, signal.stop_price, order_id,
+        )
+
+        notify(
+            "entry",
+            symbol=signal.symbol,
+            shares=shares,
+            entry=signal.entry_price,
+            stop=signal.stop_price,
+            value=position_value,
+            risk=risk_amount,
+            order_id=order_id,
         )
 
         return ExecutionResult(

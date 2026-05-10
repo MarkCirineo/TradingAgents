@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
+from tradingagents.notifications import notify
+
 logger = logging.getLogger(__name__)
 
 
@@ -430,11 +432,22 @@ class DailyWorkflow:
                 len(self._ctx.entries_submitted),
                 len(self._ctx.exits_executed),
             )
+
+            # Send daily summary notification
+            notify(
+                "daily_summary",
+                portfolio=portfolio_value,
+                entries=len(self._ctx.entries_submitted),
+                exits=len(self._ctx.exits_executed),
+                positions=num_positions,
+                pnl=0,  # TODO: calculate actual P&L from snapshots
+            )
         except Exception as exc:
             logger.warning("Failed to record snapshot: %s", exc)
 
         if self._ctx.errors:
             logger.warning("Day had %d errors: %s", len(self._ctx.errors), self._ctx.errors)
+            notify("error", message=f"Day had {len(self._ctx.errors)} errors: {', '.join(self._ctx.errors[:3])}")
 
         logger.info("=== POST-MARKET %s COMPLETE ===", self._ctx.date)
         return self._ctx
@@ -525,6 +538,7 @@ class DailyWorkflow:
             if action.action == "exit_full":
                 self._alpaca_client.close_position(action.symbol)
                 logger.info("EXIT FULL: %s — %s", action.symbol, action.reason)
+                notify("exit", symbol=action.symbol, action="exit_full", reason=action.reason)
             elif action.action == "exit_partial":
                 # Get current position to calculate shares to sell
                 pos = self._alpaca_client.get_position(action.symbol)
@@ -538,6 +552,7 @@ class DailyWorkflow:
                             "EXIT PARTIAL: %s — %d/%d shares — %s",
                             action.symbol, sell_qty, int(current_qty), action.reason,
                         )
+                        notify("exit", symbol=action.symbol, action="exit_partial", reason=action.reason)
                         # Mark as trimmed in DB
                         if self._trade_db:
                             self._trade_db.mark_trimmed(action.symbol)
@@ -550,6 +565,7 @@ class DailyWorkflow:
                 })
         except Exception as exc:
             logger.error("Exit failed for %s: %s", action.symbol, exc)
+            notify("error", message=f"Exit failed for {action.symbol}: {exc}")
 
     def _execute_stop_update(self, action):
         """Update a stop order to a new price."""
@@ -568,9 +584,11 @@ class DailyWorkflow:
                         "STOP UPDATED: %s -> $%.2f — %s",
                         action.symbol, action.new_stop, action.reason,
                     )
+                    notify("stop_update", symbol=action.symbol, new_stop=action.new_stop, reason=action.reason)
                     # Update in DB
                     if self._trade_db:
                         self._trade_db.update_stop(action.symbol, action.new_stop)
                     break
         except Exception as exc:
             logger.error("Stop update failed for %s: %s", action.symbol, exc)
+            notify("error", message=f"Stop update failed for {action.symbol}: {exc}")
