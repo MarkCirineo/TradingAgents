@@ -471,6 +471,79 @@
     border-color: var(--primary);
 }
 
+/* ─── Stat Row (key-value pairs inside cards) ─────────────── */
+.stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-xs) 0;
+    font-size: 0.8rem;
+}
+
+.stat-row__label {
+    color: var(--text-secondary);
+}
+
+.stat-row__value {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-family: var(--font-mono);
+}
+
+/* ─── Activity Feed ────────────────────────────────────────── */
+.activity-section-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: var(--space-sm);
+}
+
+.activity-orders {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.activity-order {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    transition: background var(--transition-fast);
+}
+
+.activity-order:hover {
+    background: var(--bg-card-hover);
+}
+
+.activity-order__left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.activity-order__symbol {
+    font-weight: 700;
+    font-size: 0.85rem;
+    min-width: 48px;
+}
+
+.activity-order__type {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+/* ─── Table Scroll (responsive) ────────────────────────────── */
+.table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
 /* ─── Scrollbar ────────────────────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;
