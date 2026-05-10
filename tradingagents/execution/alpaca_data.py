@@ -163,6 +163,53 @@ class AlpacaDataClient:
         bars = self.stock_client.get_stock_bars(request)
         return bars.df
 
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: TimeFrame = TimeFrame.Minute,
+    ) -> pd.DataFrame:
+        """Fetch intraday (1-min) bars for a single symbol within a window.
+
+        Used to compute the Opening Range High/Low from the first
+        ``orh_window_minutes`` after market open (typically 9:30–9:45).
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol.
+        start : datetime
+            Window start (e.g. 9:30 AM ET today).
+        end : datetime
+            Window end (e.g. 9:45 AM ET today).
+        timeframe : TimeFrame
+            Bar resolution (default 1-min).
+
+        Returns
+        -------
+        pd.DataFrame
+            OHLCV bars for the requested window.  Empty if no data.
+        """
+        request = StockBarsRequest(
+            symbol_or_symbols=[symbol],
+            timeframe=timeframe,
+            start=pd.Timestamp(start, tz="America/New_York"),
+            end=pd.Timestamp(end, tz="America/New_York"),
+            feed=DataFeed.IEX,
+        )
+        bars = self.stock_client.get_stock_bars(request)
+        df = bars.df
+        if df.empty:
+            return df
+        # Flatten multi-index if present
+        if isinstance(df.index, pd.MultiIndex):
+            try:
+                df = df.xs(symbol, level="symbol")
+            except KeyError:
+                return pd.DataFrame()
+        return df
+
     # -- convenience: technical helpers -------------------------------------
 
     def compute_sma(

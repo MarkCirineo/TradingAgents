@@ -66,11 +66,12 @@ DEFAULT_CONFIG = {
     "alpaca_paper": True,
     # Trading schedule (Eastern Time)
     "trading_schedule": {
-        "pre_market": "09:00",
-        "entry_window": "09:45",
-        "midday_check": "12:00",
-        "eod_check": "15:45",
-        "post_market": "16:15",
+        "pre_market": "08:00",              # Screener + regime check
+        "analyze": "08:05",                 # LLM/quant pipeline (runs before open)
+        "entry_window": "09:45",            # ORH/ORL buy-stop orders
+        "midday_check": "12:00",            # Day 3 trims, parabolic exits
+        "eod_check": "15:45",               # Day 1 red close, trailing SMA
+        "post_market": "16:15",             # Daily snapshot + summary
     },
     # Guardrails -- pre-trade safety checks
     "guardrails": {
