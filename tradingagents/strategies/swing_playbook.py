@@ -37,22 +37,20 @@ ALREADY VERIFIED BY THE PRE-FILTER (you do not need to check these):
 - Market regime is favorable (SPY above rising 20 MA, 10 MA > 20 MA)
 - Stock has sufficient liquidity (dollar volume > $50M)
 - Stock has sufficient volatility (ADR > 4%)
-- Stock is outperforming SPY (relative strength in top decile)
+- Stock is outperforming SPY by at least 5% over 20 days
+- Stock has a prior uptrend of at least 30% over 60 days
+- Stock's moving averages are stacked bullishly (10 > 20 > 50)
 
 YOUR JOB -- Evaluate the following. ALL must be met for a Buy recommendation.
 If ANY criterion fails, recommend Hold or Sell.
 
-1. PRIOR UPTREND -- Does this stock have momentum?
-   - Strong prior uptrend (30%+ move in recent weeks/months)
-   - Stock has been a market leader, not a laggard
-
-2. SETUP PATTERN -- Is this a breakout from tight consolidation?
+1. SETUP PATTERN -- Is this a breakout from tight consolidation?
    - Price consolidating near/above rising 10-day or 20-day MA
-   - Moving averages stacked bullishly (10 > 20 > 50)
    - Consolidation is orderly (tight range, not erratic/volatile)
    - Volume drying up during consolidation (contraction = coiling)
+   - The consolidation lasted at least several days
 
-3. ENTRY TRIGGER -- Is the breakout confirmed?
+2. ENTRY TRIGGER -- Is the breakout confirmed?
    - Price breaking above consolidation resistance on INCREASING volume
    - Volume on breakout day should be notably above average
    - Ideally within the first 1-3 days of the breakout move
@@ -61,7 +59,6 @@ DO NOT recommend entry if:
 - No clear consolidation pattern exists
 - Volume is declining on the breakout attempt
 - The stock has already extended far beyond its consolidation (chasing)
-- Moving averages are not stacked bullishly
 - The consolidation is wide and sloppy rather than tight
 
 Source: Qullamaggie momentum breakout methodology + peoplewish execution rules.
@@ -143,6 +140,7 @@ def get_screening_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return {
         "min_prior_uptrend_pct": ss.get("min_prior_uptrend_pct", 0.30),
         "min_rs_percentile": ss.get("min_rs_percentile", 0.85),
+        "min_rs_outperformance": ss.get("min_rs_outperformance", 0.05),
         "min_dollar_volume": ss.get("min_dollar_volume", 50_000_000),
         "min_adr_pct": ss.get("min_adr_pct", 0.04),
         "min_price": ss.get("min_price", 5.0),

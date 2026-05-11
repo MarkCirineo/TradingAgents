@@ -95,7 +95,8 @@ DEFAULT_CONFIG = {
     "swing_strategy": {
         # Stock selection thresholds
         "min_prior_uptrend_pct": 0.30,      # 30% prior move minimum
-        "min_rs_percentile": 0.85,          # Top 15% relative strength
+        "min_rs_percentile": 0.85,          # Top 15% relative strength (reference)
+        "min_rs_outperformance": 0.05,      # 5% above SPY over 20 days (enforced)
         "min_dollar_volume": 50_000_000,    # $50M avg daily dollar volume
         "min_adr_pct": 0.04,                # 4% average daily range
         "min_price": 5.0,                   # Minimum stock price

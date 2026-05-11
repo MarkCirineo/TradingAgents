@@ -466,15 +466,37 @@ class TradeDB:
     def record_snapshot(self, date: str, portfolio_value: float, cash: float,
                         num_positions: int, entries_today: int = 0,
                         exits_today: int = 0, regime: str = "", **kwargs):
-        """Record a daily snapshot (convenience wrapper)."""
+        """Record a daily snapshot (convenience wrapper).
+
+        Computes actual daily P&L by comparing to the previous snapshot.
+        """
         invested = portfolio_value - cash
+
+        # Compute daily P&L from previous snapshot
+        daily_pnl = 0.0
+        daily_pnl_pct = 0.0
+        try:
+            recent = self.get_recent_snapshots(days=2)
+            # Find the most recent snapshot that is NOT today's date
+            prev = next(
+                (s for s in recent if s.get("date") != date),
+                None,
+            )
+            if prev:
+                prev_value = prev.get("portfolio_value", portfolio_value)
+                if prev_value > 0:
+                    daily_pnl = portfolio_value - prev_value
+                    daily_pnl_pct = daily_pnl / prev_value
+        except Exception as exc:
+            logger.warning("Could not compute daily P&L: %s", exc)
+
         self.save_daily_snapshot(
             date=date,
             portfolio_value=portfolio_value,
             cash=cash,
             invested=invested,
-            daily_pnl=0,  # TODO: compute from previous snapshot
-            daily_pnl_pct=0,
+            daily_pnl=daily_pnl,
+            daily_pnl_pct=daily_pnl_pct,
             positions_count=num_positions,
             trades_executed=entries_today + exits_today,
         )
@@ -495,7 +517,21 @@ class TradeDB:
             trim_date=datetime.now().isoformat(),
         )
 
-    def update_stop(self, symbol: str, new_stop: float):
-        """Update the tracked stop price for a position."""
-        self.update_position(symbol, entry_orl=new_stop)
+    def update_stop(self, symbol: str, new_stop: float, stop_type: str = ""):
+        """Update the tracked stop price for a position.
+
+        Parameters
+        ----------
+        stop_type : str, optional
+            ``"breakeven"``, ``"trailing"``, or ``"lod"`` — sets the
+            corresponding flag column for audit.
+        """
+        updates = {"entry_orl": new_stop}
+        if stop_type == "breakeven":
+            updates["breakeven_stop_active"] = 1
+            updates["trailing_stop_active"] = 0
+        elif stop_type == "trailing":
+            updates["breakeven_stop_active"] = 0
+            updates["trailing_stop_active"] = 1
+        self.update_position(symbol, **updates)
 
