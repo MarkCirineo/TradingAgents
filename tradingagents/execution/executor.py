@@ -37,6 +37,7 @@ class TradeSignal:
     stop_price: float  # initial stop (e.g. ORL or LOD)
     confidence: float = 0.0  # LLM confidence score (0-1)
     rationale: str = ""  # summary from the pipeline
+    entry_type: str = "stop"  # "stop" (buy-stop at ORH) or "limit" (confirmed breakout)
 
 
 @dataclass
@@ -267,11 +268,12 @@ class Executor:
                 reason=f"guardrail: {guardrail.reason}",
             )
 
-        # 4. Submit bracket order (buy-stop at ORH)
+        # 4. Submit bracket order
         try:
             from alpaca.trading.enums import OrderSide
 
-            # Buy-stop at ORH: order only fills if price breaks above ORH.
+            # entry_type from signal: "stop" (buy-stop at ORH) or "limit"
+            # (confirmed breakout, enter at current price).
             # Stop-loss child at ORL protects downside.
             # Take-profit at entry + 3× risk as a generous ceiling.
             # Our PositionManager will typically exit before this via
@@ -279,15 +281,20 @@ class Executor:
             risk_per_share = signal.entry_price - signal.stop_price
             take_profit = round(signal.entry_price + 3 * risk_per_share, 2)
 
-            order = self._client.submit_bracket_order(
+            order_kwargs = dict(
                 symbol=signal.symbol,
                 qty=shares,
                 side=OrderSide.BUY,
-                entry_type="stop",
-                stop_price=signal.entry_price,    # ORH = trigger price
-                stop_loss_price=signal.stop_price, # ORL = stop-loss
+                entry_type=signal.entry_type,
+                stop_loss_price=signal.stop_price,
                 take_profit_price=take_profit,
             )
+            if signal.entry_type == "stop":
+                order_kwargs["stop_price"] = signal.entry_price
+            elif signal.entry_type == "limit":
+                order_kwargs["limit_price"] = signal.entry_price
+
+            order = self._client.submit_bracket_order(**order_kwargs)
             order_id = str(order.id) if hasattr(order, "id") else str(order)
         except Exception as exc:
             logger.error("Executor: order submission failed for %s: %s", signal.symbol, exc)

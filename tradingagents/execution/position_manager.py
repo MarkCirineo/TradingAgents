@@ -7,7 +7,7 @@ Exit rules (from the doc):
 1. Day 1 red close — if the stock closes below entry price on Day 1, exit
 2. Day 3+ partial profit — sell 50% of remaining position on Day 3
 3. Trailing 10 SMA — exit when price closes below the 10-day SMA
-4. Max extension — exit if price is > 7× ADR above the 10 SMA (parabolic)
+4. Max extension — exit if price is > 7× ADR above the 50 SMA (parabolic)
 5. Soft backstop — flag (but don't auto-exit) positions held > 30 days
 
 Stop management:
@@ -137,19 +137,19 @@ class PositionManager:
                     exit_pct=1.0,
                 )
 
-        # Rule 2: Max extension (parabolic move)
+        # Rule 2: Max extension (parabolic move — doc: 7× ADR above 50 SMA)
         try:
             adr = self.data_client.compute_adr_pct(symbol, period=14) * latest_close
-            sma_10 = self.data_client.compute_sma(symbol, period=10)
-            if not sma_10.empty:
-                sma_10_val = float(sma_10.iloc[-1])
-                extension = (latest_close - sma_10_val) / adr if adr > 0 else 0
+            sma_50 = self.data_client.compute_sma(symbol, period=50)
+            if not sma_50.empty:
+                sma_50_val = float(sma_50.iloc[-1])
+                extension = (latest_close - sma_50_val) / adr if adr > 0 else 0
                 if extension > self._rules["max_extension_adr_multiple"]:
                     return PositionAction(
                         symbol=symbol,
                         action="exit_full",
                         reason=(
-                            f"Parabolic extension: {extension:.1f}x ADR above 10 SMA "
+                            f"Parabolic extension: {extension:.1f}x ADR above 50 SMA "
                             f"(limit: {self._rules['max_extension_adr_multiple']}x)"
                         ),
                         exit_pct=1.0,
@@ -170,6 +170,7 @@ class PositionManager:
 
         # Rule 4: Trailing 10 SMA exit
         try:
+            sma_10 = self.data_client.compute_sma(symbol, period=10)
             if not sma_10.empty:
                 sma_10_val = float(sma_10.iloc[-1])
                 trail_trigger = self._rules["trailing_ma_exit_on"]
@@ -179,7 +180,12 @@ class PositionManager:
                 else:  # "low"
                     exit_triggered = latest_low < sma_10_val
 
-                if day_count >= 3 and exit_triggered:
+                # Only trail once the 10 SMA has surpassed entry price
+                # (doc: "I move the rest up to break even until the 10DMA
+                # surpasses my average and that's when the trailing starts.")
+                trailing_active = sma_10_val >= entry_price
+
+                if day_count >= 3 and trailing_active and exit_triggered:
                     return PositionAction(
                         symbol=symbol,
                         action="exit_full",
@@ -191,7 +197,8 @@ class PositionManager:
                     )
 
                 # Update trailing stop to 10 SMA if higher than current stop
-                if day_count >= 3 and sma_10_val > current_stop:
+                # AND the 10 SMA has surpassed entry (breakeven guard)
+                if day_count >= 3 and trailing_active and sma_10_val > current_stop:
                     return PositionAction(
                         symbol=symbol,
                         action="update_stop",

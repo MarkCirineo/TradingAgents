@@ -8,7 +8,9 @@ wisdom lives in code:
 - ADR > 4%
 - Price $5-$500
 - Market regime (SPY above rising 20 MA, 10 MA > 20 MA)
-- Relative strength (outperforming SPY over 20 days)
+- Relative strength (outperforming SPY by >= 5% over 20 days)
+- Prior uptrend (>= 30% gain over 60 days)
+- MA stacking (10 SMA > 20 SMA > 50 SMA -- bullish stack)
 - Volume contraction (consolidation signal)
 - Already-held filter (skip if we have an open position)
 """
@@ -179,13 +181,14 @@ class PreFilter:
         # 5. Relative strength vs SPY
         try:
             rs = self.data_client.compute_relative_strength(symbol, benchmark="SPY", period=20)
-            checks["relative_strength"] = rs > 0  # outperforming SPY
+            min_rs = self._params.get("min_rs_outperformance", 0.05)
+            checks["relative_strength"] = rs >= min_rs  # must outperform by >= 5%
             checks["relative_strength_value"] = round(rs, 4)
             if checks["relative_strength"]:
                 score += 1.5  # High weight -- this is key for the strategy
             else:
                 reject_reasons.append(
-                    f"underperforming SPY (RS={rs:.4f})"
+                    f"RS {rs:.2%} < required {min_rs:.0%} above SPY"
                 )
         except Exception as exc:
             logger.warning("RS check failed for %s: %s", symbol, exc)
@@ -213,14 +216,78 @@ class PreFilter:
             logger.warning("Volume contraction check failed for %s: %s", symbol, exc)
             checks["volume_contraction"] = False
 
+        # 7. Prior uptrend check (doc: "30%+ move in recent weeks/months")
+        try:
+            bars_uptrend = self.data_client.get_bars(symbol, lookback_days=90)
+            if not bars_uptrend.empty:
+                import pandas as pd
+                if isinstance(bars_uptrend.index, pd.MultiIndex):
+                    bars_uptrend = bars_uptrend.xs(symbol, level="symbol")
+                if len(bars_uptrend) >= 20:
+                    close = bars_uptrend["close"]
+                    # Find the max return from any point in the last 60 trading
+                    # days to the current close — this captures the "pole" move.
+                    current_close = float(close.iloc[-1])
+                    lookback = close.tail(60)
+                    min_price_in_window = float(lookback.min())
+                    uptrend_pct = (current_close - min_price_in_window) / min_price_in_window
+                    min_uptrend = self._params.get("min_prior_uptrend_pct", 0.30)
+                    checks["prior_uptrend"] = uptrend_pct >= min_uptrend
+                    checks["prior_uptrend_value"] = round(uptrend_pct, 4)
+                    if checks["prior_uptrend"]:
+                        score += 1.0
+                    else:
+                        reject_reasons.append(
+                            f"prior uptrend {uptrend_pct:.1%} < required {min_uptrend:.0%}"
+                        )
+                else:
+                    checks["prior_uptrend"] = False
+                    reject_reasons.append("insufficient data for uptrend check")
+            else:
+                checks["prior_uptrend"] = False
+                reject_reasons.append("no data for uptrend check")
+        except Exception as exc:
+            logger.warning("Prior uptrend check failed for %s: %s", symbol, exc)
+            checks["prior_uptrend"] = False
+            reject_reasons.append(f"uptrend check error: {exc}")
+
+        # 8. MA stacking (doc: "10 > 20 > 50 -- bullish stack")
+        try:
+            sma_10 = self.data_client.compute_sma(symbol, period=10, lookback_days=100)
+            sma_20 = self.data_client.compute_sma(symbol, period=20, lookback_days=100)
+            sma_50 = self.data_client.compute_sma(symbol, period=50, lookback_days=100)
+            if not sma_10.empty and not sma_20.empty and not sma_50.empty:
+                s10 = float(sma_10.iloc[-1])
+                s20 = float(sma_20.iloc[-1])
+                s50 = float(sma_50.iloc[-1])
+                stacked = s10 > s20 > s50
+                checks["ma_stacking"] = stacked
+                checks["ma_values"] = {"sma_10": round(s10, 2), "sma_20": round(s20, 2), "sma_50": round(s50, 2)}
+                if stacked:
+                    score += 1.0
+                else:
+                    reject_reasons.append(
+                        f"MAs not stacked: 10={s10:.2f}, 20={s20:.2f}, 50={s50:.2f}"
+                    )
+            else:
+                checks["ma_stacking"] = False
+                reject_reasons.append("insufficient data for MA stacking")
+        except Exception as exc:
+            logger.warning("MA stacking check failed for %s: %s", symbol, exc)
+            checks["ma_stacking"] = False
+            reject_reasons.append(f"MA stacking error: {exc}")
+
         # Determine pass/fail
-        # Must pass: not already held, dollar volume, ADR, price range, relative strength
+        # Must pass: not already held, dollar volume, ADR, price range,
+        # relative strength, prior uptrend, MA stacking
         required_checks = [
             checks.get("already_held", False),
             checks.get("dollar_volume", False),
             checks.get("adr_pct", False),
             checks.get("price_range", False),
             checks.get("relative_strength", False),
+            checks.get("prior_uptrend", False),
+            checks.get("ma_stacking", False),
         ]
         passed = all(required_checks)
 

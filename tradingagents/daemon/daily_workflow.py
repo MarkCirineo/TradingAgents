@@ -283,16 +283,79 @@ class DailyWorkflow:
                     continue
 
                 logger.info(
-                    "%s: ORH=$%.2f, ORL=$%.2f — submitting buy-stop",
+                    "%s: ORH=$%.2f, ORL=$%.2f — checking current price",
                     symbol, orh, orl,
                 )
+
+                # Check current price relative to ORH to determine order type.
+                # If price is already above ORH, a buy-stop at ORH would either
+                # immediately fill at a worse price or get rejected by Alpaca.
+                risk_per_share = orh - orl
+                try:
+                    snap = self._data_client.get_snapshots([symbol])
+                    current_price = float(snap[symbol].latest_trade.price)
+                except Exception:
+                    # Fallback: use ORH as the estimate (conservative)
+                    current_price = orh
+
+                if current_price < orl:
+                    # Range broke down — skip entry
+                    logger.info(
+                        "%s: price $%.2f < ORL $%.2f — range breakdown, skipping",
+                        symbol, current_price, orl,
+                    )
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="skip:range_breakdown",
+                    )
+                    continue
+
+                elif current_price <= orh:
+                    # Normal case: price still below ORH — submit buy-stop
+                    entry_type = "stop"
+                    entry_price = orh
+                    logger.info(
+                        "%s: price $%.2f <= ORH $%.2f — buy-stop at ORH",
+                        symbol, current_price, orh,
+                    )
+
+                elif current_price <= orh + risk_per_share:
+                    # Breakout already confirmed but not extended — enter at market
+                    # Recalculate sizing with actual risk = current_price - ORL
+                    entry_type = "limit"
+                    entry_price = round(current_price, 2)
+                    logger.info(
+                        "%s: price $%.2f > ORH $%.2f (breakout confirmed) — "
+                        "limit entry at $%.2f",
+                        symbol, current_price, orh, entry_price,
+                    )
+
+                else:
+                    # Too extended — chasing territory, skip
+                    logger.info(
+                        "%s: price $%.2f >> ORH $%.2f (extended by $%.2f > "
+                        "risk $%.2f) — skipping to avoid chasing",
+                        symbol, current_price, orh,
+                        current_price - orh, risk_per_share,
+                    )
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="skip:too_extended",
+                    )
+                    continue
 
                 signal = TradeSignal(
                     symbol=symbol,
                     action="buy",
-                    entry_price=orh,   # buy-stop trigger at ORH
+                    entry_price=entry_price,
                     stop_price=orl,    # stop-loss at ORL
-                    rationale=f"ORH breakout: buy-stop @ ${orh:.2f}, stop @ ${orl:.2f}",
+                    rationale=(
+                        f"ORH breakout ({entry_type}): entry @ ${entry_price:.2f}, "
+                        f"stop @ ${orl:.2f}"
+                    ),
+                    entry_type=entry_type,
                 )
 
                 result = executor.execute_entry(signal)
@@ -494,14 +557,16 @@ class DailyWorkflow:
                 len(self._ctx.exits_executed),
             )
 
-            # Send daily summary notification
+            # Send daily summary notification (with actual P&L)
+            snapshot = self._trade_db.get_daily_snapshot(self._ctx.date)
+            actual_pnl = snapshot.get("daily_pnl", 0) if snapshot else 0
             notify(
                 "daily_summary",
                 portfolio=portfolio_value,
                 entries=len(self._ctx.entries_submitted),
                 exits=len(self._ctx.exits_executed),
                 positions=num_positions,
-                pnl=0,  # TODO: calculate actual P&L from snapshots
+                pnl=actual_pnl,
             )
         except Exception as exc:
             logger.warning("Failed to record snapshot: %s", exc)
@@ -691,9 +756,18 @@ class DailyWorkflow:
                         action.symbol, action.new_stop, action.reason,
                     )
                     notify("stop_update", symbol=action.symbol, new_stop=action.new_stop, reason=action.reason)
-                    # Update in DB
+                    # Determine stop type from reason for audit trail
+                    if "breakeven" in action.reason.lower():
+                        stop_type = "breakeven"
+                    elif "trailing" in action.reason.lower() or "SMA" in action.reason:
+                        stop_type = "trailing"
+                    elif "LOD" in action.reason:
+                        stop_type = "lod"
+                    else:
+                        stop_type = ""
+                    # Update in DB with stop type flag
                     if self._trade_db:
-                        self._trade_db.update_stop(action.symbol, action.new_stop)
+                        self._trade_db.update_stop(action.symbol, action.new_stop, stop_type=stop_type)
                     break
         except Exception as exc:
             logger.error("Stop update failed for %s: %s", action.symbol, exc)
