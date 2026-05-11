@@ -84,39 +84,36 @@ async def _event_generator():
 
             yield _make_sse_event("portfolio_update", portfolio_data)
 
-            # ── Positions update ───────────────────────────────────
+            # ── Positions update (Alpaca = source of truth) ─────────
             positions_data = []
-            db_positions = db.get_open_positions()
-
-            # Build live price map
-            alpaca_prices = {}
             if client:
                 try:
-                    for pos in client.get_all_positions():
-                        alpaca_prices[pos.symbol] = {
-                            "current_price": float(pos.current_price),
-                            "unrealized_pl": float(pos.unrealized_pl),
-                            "unrealized_plpc": float(pos.unrealized_plpc) * 100,
-                        }
+                    alpaca_positions = client.get_all_positions()
+
+                    # Optional DB enrichment
+                    db_map = {}
+                    try:
+                        for p in db.get_open_positions():
+                            db_map[p["symbol"]] = p
+                    except Exception:
+                        pass
+
+                    for pos in alpaca_positions:
+                        symbol = pos.symbol
+                        db_data = db_map.get(symbol, {})
+                        positions_data.append({
+                            "symbol": symbol,
+                            "entry_price": float(pos.avg_entry_price),
+                            "current_price": round(float(pos.current_price), 2),
+                            "unrealized_pl": round(float(pos.unrealized_pl), 2),
+                            "unrealized_plpc": round(float(pos.unrealized_plpc) * 100, 2),
+                            "current_qty": int(float(pos.qty)),
+                            "day_count": db_data.get("day_count", 1),
+                            "trimmed": bool(db_data.get("trimmed", 0)),
+                            "pipeline_mode": db_data.get("pipeline_mode", "quant"),
+                        })
                 except Exception:
                     pass
-
-            for pos in db_positions:
-                symbol = pos["symbol"]
-                live = alpaca_prices.get(symbol, {})
-                entry_price = pos.get("entry_price", 0)
-                current_price = live.get("current_price", entry_price)
-
-                positions_data.append({
-                    "symbol": symbol,
-                    "entry_price": entry_price,
-                    "current_price": round(current_price, 2),
-                    "unrealized_pl": round(live.get("unrealized_pl", 0), 2),
-                    "unrealized_plpc": round(live.get("unrealized_plpc", 0), 2),
-                    "day_count": pos.get("day_count", 1),
-                    "current_qty": pos.get("current_qty", 0),
-                    "trimmed": bool(pos.get("trimmed", 0)),
-                })
 
             yield _make_sse_event("positions_update", {
                 "positions": positions_data,

@@ -76,13 +76,18 @@ async def get_comparison():
     else:
         local_data["portfolio"] = {}
 
-    # Positions
-    positions = db.get_open_positions()
+    # Positions (Alpaca = source of truth for open positions)
+    open_positions = []
+    if client:
+        try:
+            open_positions = client.get_all_positions()
+        except Exception as exc:
+            logger.warning("Failed to get Alpaca positions for comparison: %s", exc)
     closed = db.get_closed_positions(limit=50)
     local_data["positions"] = {
-        "open": len(positions),
+        "open": len(open_positions),
         "closed": len(closed),
-        "symbols": [p["symbol"] for p in positions],
+        "symbols": [p.symbol for p in open_positions],
     }
 
     # Orders

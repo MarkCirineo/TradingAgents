@@ -1,8 +1,12 @@
 """Portfolio, account, and position API endpoints.
 
-These endpoints merge data from two sources:
-- **TradeDB** (SQLite): Our tracked positions, historical data
-- **AlpacaClient**: Live account/portfolio data, bracket order legs
+Data source policy:
+- **AlpacaClient** is the **source of truth** for all live data:
+  portfolio value, cash, positions, bracket order legs.
+- **TradeDB** (SQLite) is used only for optional metadata enrichment
+  (day count, pipeline mode, entry ORL/LOD, etc.) and historical
+  snapshots for daily P&L calculation.
+- The Orders page is the only consumer that reads directly from TradeDB.
 """
 
 from __future__ import annotations
@@ -142,100 +146,90 @@ async def get_account():
 
 @router.get("/positions")
 async def get_positions():
-    """Return open positions with live Alpaca data + bracket leg prices.
+    """Return open positions from Alpaca (source of truth).
 
-    Merges:
-    - TradeDB position records (entry price, day count, stop levels)
-    - Alpaca live position data (current price, unrealized P&L)
-    - Alpaca bracket order legs (stop-loss price, take-profit price)
+    Alpaca's ``get_all_positions()`` determines which positions are
+    actually open.  DB metadata (day count, pipeline mode, ORL/LOD)
+    is merged in as optional enrichment only.
     """
     from tradingagents.dashboard.app import get_alpaca_client, get_trade_db
 
     client = get_alpaca_client()
+    if not client:
+        return {"positions": [], "count": 0, "source": "unavailable"}
+
     db = get_trade_db()
 
-    # Get our tracked positions from DB
-    db_positions = db.get_open_positions()
+    # ── Step 1: Alpaca positions (source of truth) ─────────────
+    try:
+        alpaca_positions = client.get_all_positions()
+    except Exception as exc:
+        logger.warning("Failed to get Alpaca positions: %s", exc)
+        return {"positions": [], "count": 0, "source": "error: broker_unavailable"}
 
-    # Get live data from Alpaca
-    alpaca_positions = {}
-    if client:
-        try:
-            for pos in client.get_all_positions():
-                alpaca_positions[pos.symbol] = {
-                    "current_price": float(pos.current_price),
-                    "market_value": float(pos.market_value),
-                    "unrealized_pl": float(pos.unrealized_pl),
-                    "unrealized_plpc": float(pos.unrealized_plpc) * 100,
-                    "qty": float(pos.qty),
-                    "avg_entry_price": float(pos.avg_entry_price),
-                    "cost_basis": float(pos.cost_basis),
-                }
-        except Exception as exc:
-            logger.warning("Failed to get Alpaca positions: %s", exc)
+    # ── Step 2: Bracket order legs for stop/TP prices ──────────
+    bracket_legs: dict = {}
+    try:
+        from alpaca.trading.enums import QueryOrderStatus
+        orders = client.get_orders_nested(status=QueryOrderStatus.OPEN)
+        for order in orders:
+            symbol = order.symbol
+            if hasattr(order, "legs") and order.legs:
+                legs_data = {"stop_price": None, "take_profit_price": None}
+                for leg in order.legs:
+                    leg_type = str(getattr(leg, "order_type", "")).lower()
+                    if "stop" in leg_type:
+                        legs_data["stop_price"] = float(leg.stop_price) if leg.stop_price else None
+                    elif "limit" in leg_type:
+                        legs_data["take_profit_price"] = float(leg.limit_price) if leg.limit_price else None
+                bracket_legs[symbol] = legs_data
+    except Exception as exc:
+        logger.warning("Failed to get bracket legs: %s", exc)
 
-    # Get bracket order legs for stop/TP prices
-    bracket_legs = {}
-    if client:
-        try:
-            from alpaca.trading.enums import QueryOrderStatus
-            orders = client.get_orders_nested(status=QueryOrderStatus.OPEN)
-            for order in orders:
-                symbol = order.symbol
-                if hasattr(order, "legs") and order.legs:
-                    legs_data = {"stop_price": None, "take_profit_price": None}
-                    for leg in order.legs:
-                        leg_type = str(getattr(leg, "order_type", "")).lower()
-                        if "stop" in leg_type:
-                            legs_data["stop_price"] = float(leg.stop_price) if leg.stop_price else None
-                        elif "limit" in leg_type:
-                            legs_data["take_profit_price"] = float(leg.limit_price) if leg.limit_price else None
-                    bracket_legs[symbol] = legs_data
-        except Exception as exc:
-            logger.warning("Failed to get bracket legs: %s", exc)
+    # ── Step 3: DB metadata for enrichment (optional) ──────────
+    db_map: dict = {}
+    try:
+        for pos in db.get_open_positions():
+            db_map[pos["symbol"]] = pos
+    except Exception:
+        pass  # DB enrichment is best-effort
 
-    # Merge everything
+    # ── Step 4: Build response driven by Alpaca ────────────────
     merged = []
-    for pos in db_positions:
-        symbol = pos["symbol"]
-        live = alpaca_positions.get(symbol, {})
+    for pos in alpaca_positions:
+        symbol = pos.symbol
+        db_data = db_map.get(symbol, {})
         legs = bracket_legs.get(symbol, {})
 
-        current_price = live.get("current_price", pos.get("entry_price", 0))
-        entry_price = pos.get("entry_price", 0)
-        qty = pos.get("current_qty", 0)
-        unrealized_pl = live.get("unrealized_pl", (current_price - entry_price) * qty if entry_price else 0)
-        unrealized_plpc = live.get("unrealized_plpc", 
-            ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0)
-
         merged.append({
-            # DB data
+            # Alpaca live data (source of truth)
             "symbol": symbol,
-            "entry_date": pos.get("entry_date"),
-            "entry_price": entry_price,
-            "entry_orl": pos.get("entry_orl"),
-            "entry_lod": pos.get("entry_lod"),
-            "original_qty": pos.get("original_qty"),
-            "current_qty": qty,
-            "day_count": pos.get("day_count", 1),
-            "trimmed": bool(pos.get("trimmed", 0)),
-            "breakeven_stop_active": bool(pos.get("breakeven_stop_active", 0)),
-            "trailing_stop_active": bool(pos.get("trailing_stop_active", 0)),
-            "pipeline_mode": pos.get("pipeline_mode", "full"),
-            "stop_order_id": pos.get("stop_order_id"),
+            "entry_price": float(pos.avg_entry_price),
+            "current_price": round(float(pos.current_price), 2),
+            "current_qty": int(float(pos.qty)),
+            "market_value": round(float(pos.market_value), 2),
+            "unrealized_pl": round(float(pos.unrealized_pl), 2),
+            "unrealized_plpc": round(float(pos.unrealized_plpc) * 100, 2),
+            "cost_basis": round(float(pos.cost_basis), 2),
 
-            # Live Alpaca data
-            "current_price": round(current_price, 2),
-            "market_value": round(live.get("market_value", current_price * qty), 2),
-            "unrealized_pl": round(unrealized_pl, 2),
-            "unrealized_plpc": round(unrealized_plpc, 2),
+            # DB enrichment (optional metadata)
+            "entry_date": db_data.get("entry_date"),
+            "entry_orl": db_data.get("entry_orl"),
+            "entry_lod": db_data.get("entry_lod"),
+            "original_qty": db_data.get("original_qty"),
+            "day_count": db_data.get("day_count", 1),
+            "trimmed": bool(db_data.get("trimmed", 0)),
+            "breakeven_stop_active": bool(db_data.get("breakeven_stop_active", 0)),
+            "trailing_stop_active": bool(db_data.get("trailing_stop_active", 0)),
+            "pipeline_mode": db_data.get("pipeline_mode", "quant"),
+            "stop_order_id": db_data.get("stop_order_id"),
 
-            # Bracket legs (hero feature)
+            # Bracket legs
             "stop_price": legs.get("stop_price"),
             "take_profit_price": legs.get("take_profit_price"),
         })
 
-    return {"positions": merged, "count": len(merged)}
+    return {"positions": merged, "count": len(merged), "source": "alpaca_live"}
 
 
 # ---------------------------------------------------------------------------
@@ -246,23 +240,22 @@ async def get_positions():
 async def get_position_detail(symbol: str):
     """Return detailed position info for a single symbol.
 
-    Includes bracket order legs, related orders, and LLM analysis.
+    Alpaca is the source of truth for whether the position exists.
+    DB data provides optional enrichment (entry ORL/LOD, pipeline mode,
+    day count, etc.).  Bracket order legs and related DB orders are
+    included when available.
     """
     from tradingagents.dashboard.app import get_alpaca_client, get_trade_db
 
     client = get_alpaca_client()
     db = get_trade_db()
+    symbol = symbol.upper()
 
-    # DB position
-    pos = db.get_position(symbol.upper())
-    if not pos:
-        raise HTTPException(404, f"No position found for {symbol}")
-
-    # Live Alpaca data
+    # ── Primary: Alpaca live position ──────────────────────────
     live_data = {}
     if client:
         try:
-            alpaca_pos = client.get_position(symbol.upper())
+            alpaca_pos = client.get_position(symbol)
             if alpaca_pos:
                 live_data = {
                     "current_price": float(alpaca_pos.current_price),
@@ -271,15 +264,34 @@ async def get_position_detail(symbol: str):
                     "unrealized_plpc": float(alpaca_pos.unrealized_plpc) * 100,
                     "avg_entry_price": float(alpaca_pos.avg_entry_price),
                     "cost_basis": float(alpaca_pos.cost_basis),
+                    "qty": float(alpaca_pos.qty),
                 }
         except Exception as exc:
             logger.warning("Failed to get Alpaca position for %s: %s", symbol, exc)
 
-    # Bracket order legs
+    # ── Enrichment: DB position metadata ───────────────────────
+    db_pos = db.get_position(symbol)
+
+    # If neither Alpaca nor DB knows this symbol, 404
+    if not live_data and not db_pos:
+        raise HTTPException(404, f"No position found for {symbol}")
+
+    # Build a merged position dict (Alpaca wins for price data)
+    pos = db_pos or {}
+    if live_data:
+        pos["current_price"] = live_data["current_price"]
+        pos["market_value"] = live_data["market_value"]
+        pos["unrealized_pl"] = live_data["unrealized_pl"]
+        pos["unrealized_plpc"] = live_data["unrealized_plpc"]
+        pos.setdefault("entry_price", live_data["avg_entry_price"])
+        pos.setdefault("current_qty", int(live_data.get("qty", 0)))
+
+    # ── Bracket order legs ─────────────────────────────────────
     bracket_info = {}
-    if client and pos.get("stop_order_id"):
+    stop_order_id = pos.get("stop_order_id") if pos else None
+    if client and stop_order_id:
         try:
-            order = client.get_order_nested(pos["stop_order_id"])
+            order = client.get_order_nested(stop_order_id)
             if order and hasattr(order, "legs") and order.legs:
                 bracket_info = {
                     "parent_order": _serialize_alpaca_obj(order),
@@ -288,14 +300,15 @@ async def get_position_detail(symbol: str):
         except Exception as exc:
             logger.warning("Failed to get bracket info for %s: %s", symbol, exc)
 
-    # Related orders from DB
-    related_orders = db.get_orders_for_symbol(symbol.upper())
+    # ── Related orders from DB ─────────────────────────────────
+    related_orders = db.get_orders_for_symbol(symbol)
 
     return {
         "position": pos,
         "live": live_data,
         "bracket": bracket_info,
         "orders": related_orders,
+        "source": "alpaca_live" if live_data else "db_only",
     }
 
 
