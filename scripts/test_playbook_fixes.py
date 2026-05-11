@@ -18,7 +18,6 @@ load_dotenv()
 # Ensure we can import the project
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
 PASS = "[PASS]"
@@ -122,8 +121,8 @@ try:
     print(f"  Result: passed={result2.passed}, score={result2.score}")
     if result2.reject_reason:
         print(f"  Reject: {result2.reject_reason[:120]}")
-    check(f"Weak stock filtered ({weak_ticker})", not result2.passed or True,
-          "correctly rejected" if not result2.passed else "passed (surprising but ok)")
+    check(f"Weak stock filtered ({weak_ticker})", not result2.passed,
+          "correctly rejected" if not result2.passed else "unexpectedly passed")
 
 except Exception as exc:
     print(f"  ERROR: {exc}")

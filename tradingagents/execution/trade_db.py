@@ -476,9 +476,14 @@ class TradeDB:
         daily_pnl = 0.0
         daily_pnl_pct = 0.0
         try:
-            prev = self.get_recent_snapshots(days=1)
+            recent = self.get_recent_snapshots(days=2)
+            # Find the most recent snapshot that is NOT today's date
+            prev = next(
+                (s for s in recent if s.get("date") != date),
+                None,
+            )
             if prev:
-                prev_value = prev[0].get("portfolio_value", portfolio_value)
+                prev_value = prev.get("portfolio_value", portfolio_value)
                 if prev_value > 0:
                     daily_pnl = portfolio_value - prev_value
                     daily_pnl_pct = daily_pnl / prev_value

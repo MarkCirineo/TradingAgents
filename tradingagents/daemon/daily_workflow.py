@@ -294,9 +294,18 @@ class DailyWorkflow:
                 try:
                     snap = self._data_client.get_snapshots([symbol])
                     current_price = float(snap[symbol].latest_trade.price)
-                except Exception:
-                    # Fallback: use ORH as the estimate (conservative)
-                    current_price = orh
+                except Exception as exc:
+                    # Can't determine current price — skip to avoid blind ordering
+                    logger.warning(
+                        "%s: price lookup failed (%s) — skipping entry",
+                        symbol, exc,
+                    )
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="skip:price_unavailable",
+                    )
+                    continue
 
                 if current_price < orl:
                     # Range broke down — skip entry

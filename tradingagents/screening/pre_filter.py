@@ -223,7 +223,7 @@ class PreFilter:
                 import pandas as pd
                 if isinstance(bars_uptrend.index, pd.MultiIndex):
                     bars_uptrend = bars_uptrend.xs(symbol, level="symbol")
-                if len(bars_uptrend) >= 20:
+                if len(bars_uptrend) >= 40:
                     close = bars_uptrend["close"]
                     # Find the max return from any point in the last 60 trading
                     # days to the current close — this captures the "pole" move.
