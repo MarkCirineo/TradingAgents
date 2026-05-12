@@ -8,7 +8,7 @@ The scheduler creates cron jobs for each trading time slot and runs
 the ``DailyWorkflow`` at those times on market days.
 
 Schedule (Eastern Time):
-    8:00 AM   pre_market       — screener + regime check
+    7:55 AM   pre_market       — screener + regime check
     8:05 AM   analyze          — LLM/quant pipeline → store decisions
     9:45 AM   entry_window     — fetch ORH/ORL → submit buy-stop orders
    12:00 PM   midday_check     — Day 3 trims, parabolic exits
@@ -56,7 +56,7 @@ class TradingDaemon:
 
         # Parse schedule times (format: "HH:MM")
         jobs = [
-            ("pre_market",   schedule.get("pre_market", "08:00"),   self._workflow.pre_market),
+            ("pre_market",   schedule.get("pre_market", "07:55"),   self._workflow.pre_market),
             ("analyze",      schedule.get("analyze", "08:05"),      self._workflow.analyze),
             ("entry_window", schedule.get("entry_window", "09:45"), self._workflow.entry_window),
             ("midday_check", schedule.get("midday_check", "12:00"), self._workflow.midday_check),

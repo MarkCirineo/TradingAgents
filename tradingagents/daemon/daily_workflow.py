@@ -2,7 +2,7 @@
 
 Each function maps to a time slot in the trading day:
 
-    8:00 AM  pre_market()     — screener + regime check + pre-filter
+    7:55 AM  pre_market()     — screener + regime check + pre-filter
     8:05 AM  analyze()        — LLM/quant pipeline → store decisions
     9:45 AM  entry_window()   — fetch ORH/ORL → submit buy-stop orders
    12:00 PM  midday_check()   — Day 3 trims, parabolic extension exits
