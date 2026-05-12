@@ -534,6 +534,10 @@ class DailyWorkflow:
 
         self._ensure_components()
 
+        # Reconcile our DB with Alpaca's actual positions.
+        # This cleans up stale test data and positions closed externally.
+        self._reconcile_positions()
+
         # Increment day counts for all open positions
         try:
             positions = self._trade_db.get_open_positions()
@@ -586,6 +590,48 @@ class DailyWorkflow:
 
         logger.info("=== POST-MARKET %s COMPLETE ===", self._ctx.date)
         return self._ctx
+
+    # -- reconciliation -----------------------------------------------------
+
+    def _reconcile_positions(self):
+        """Sync trade_db positions with Alpaca's actual positions.
+
+        Any position marked OPEN in our DB that doesn't exist in Alpaca
+        gets closed with reason ``EXTERNAL_SYNC``.  This handles:
+
+        - Manual sells via Alpaca UI
+        - Stop-loss fills we didn't track
+        - Stale test data
+        """
+        if not self._trade_db or not self._alpaca_client:
+            return
+
+        db_open = self._trade_db.get_open_positions()
+        if not db_open:
+            return
+
+        # Get actual positions from Alpaca
+        try:
+            alpaca_positions = self._alpaca_client.get_all_positions()
+            alpaca_symbols = {p.symbol for p in alpaca_positions}
+        except Exception as exc:
+            logger.warning("Reconciliation skipped — could not fetch Alpaca positions: %s", exc)
+            return
+
+        synced = 0
+        for pos in db_open:
+            if pos["symbol"] not in alpaca_symbols:
+                self._trade_db.close_position(pos["symbol"], "EXTERNAL_SYNC")
+                logger.warning(
+                    "SYNC: closed stale DB position %s (not in Alpaca)",
+                    pos["symbol"],
+                )
+                synced += 1
+
+        if synced:
+            logger.info("Reconciled %d stale position(s)", synced)
+        else:
+            logger.debug("Position reconciliation: all %d DB positions match Alpaca", len(db_open))
 
     # -- helpers ------------------------------------------------------------
 
@@ -713,8 +759,40 @@ class DailyWorkflow:
             return (0.0, 0.0)
 
     def _execute_exit(self, action):
-        """Execute an exit (full or partial) via Alpaca."""
+        """Execute an exit (full or partial) via Alpaca.
+
+        Before closing, cancels any open orders for the symbol (bracket
+        child legs lock the shares and must be removed first).
+        """
         try:
+            # Cancel any open orders for this symbol first.
+            # Bracket order children (stop-loss, take-profit) lock the
+            # shares — we must cancel them before we can close.
+            try:
+                open_orders = self._alpaca_client.get_orders(
+                    symbols=[action.symbol],
+                )
+                for order in open_orders:
+                    try:
+                        self._alpaca_client.cancel_order(str(order.id))
+                        logger.info(
+                            "Cancelled order %s (%s) for %s before exit",
+                            order.id, getattr(order, "type", "?"), action.symbol,
+                        )
+                    except Exception as cancel_exc:
+                        logger.warning(
+                            "Could not cancel order %s: %s",
+                            order.id, cancel_exc,
+                        )
+                if open_orders:
+                    import time
+                    time.sleep(0.5)  # let Alpaca process cancellations
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch/cancel orders for %s: %s",
+                    action.symbol, exc,
+                )
+
             if action.action == "exit_full":
                 self._alpaca_client.close_position(action.symbol)
                 logger.info("EXIT FULL: %s — %s", action.symbol, action.reason)
@@ -743,9 +821,30 @@ class DailyWorkflow:
                     "action": action.action,
                     "reason": action.reason,
                 })
+
+            # Sync our DB regardless of exit type
+            if self._trade_db and action.action == "exit_full":
+                self._trade_db.close_position(action.symbol, action.reason)
+
         except Exception as exc:
-            logger.error("Exit failed for %s: %s", action.symbol, exc)
-            notify("error", message=f"Exit failed for {action.symbol}: {exc}")
+            error_msg = str(exc).lower()
+            if "not found" in error_msg or "available" in error_msg or "no position" in error_msg:
+                # Position already closed externally — sync our DB
+                logger.warning(
+                    "Position %s already closed externally — syncing DB",
+                    action.symbol,
+                )
+                if self._trade_db:
+                    self._trade_db.close_position(action.symbol, "EXTERNAL_SYNC")
+                if self._ctx:
+                    self._ctx.exits_executed.append({
+                        "symbol": action.symbol,
+                        "action": action.action,
+                        "reason": f"{action.reason} (synced: already closed)",
+                    })
+            else:
+                logger.error("Exit failed for %s: %s", action.symbol, exc)
+                notify("error", message=f"Exit failed for {action.symbol}: {exc}")
 
     def _execute_stop_update(self, action):
         """Update a stop order to a new price."""
