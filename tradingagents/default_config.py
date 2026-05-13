@@ -68,7 +68,7 @@ DEFAULT_CONFIG = {
     "trading_schedule": {
         "pre_market": "07:55",              # Screener + regime check
         "analyze": "08:05",                 # LLM/quant pipeline (runs before open)
-        "entry_window": "09:45",            # ORH/ORL buy-stop orders
+        "execute_entries": "09:30",          # Consolidation pivot breakout orders
         "midday_check": "12:00",            # Day 3 trims, parabolic exits
         "eod_check": "15:45",               # Day 1 red close, trailing SMA
         "post_market": "16:15",             # Daily snapshot + summary
@@ -102,7 +102,7 @@ DEFAULT_CONFIG = {
         "min_price": 5.0,                   # Minimum stock price
         "max_price": 500.0,                 # Maximum stock price
         # Entry method
-        "orh_window_minutes": 15,           # Opening range window (9:30-9:45)
+        "orh_window_minutes": 15,           # Opening range window (reserved for EP support)
         # Exit rules
         "day1_red_close_exit": True,        # Exit if Day 1 closes red
         "partial_profit_day": 3,            # Sell 50% on Day 3

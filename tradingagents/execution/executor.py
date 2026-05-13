@@ -37,7 +37,7 @@ class TradeSignal:
     stop_price: float  # initial stop (e.g. ORL or LOD)
     confidence: float = 0.0  # LLM confidence score (0-1)
     rationale: str = ""  # summary from the pipeline
-    entry_type: str = "stop"  # "stop" (buy-stop at ORH) or "limit" (confirmed breakout)
+    entry_type: str = "stop"  # "stop" (buy-stop at pivot), "market" (confirmed breakout), or "limit"
 
 
 @dataclass
@@ -272,9 +272,9 @@ class Executor:
         try:
             from alpaca.trading.enums import OrderSide
 
-            # entry_type from signal: "stop" (buy-stop at ORH) or "limit"
-            # (confirmed breakout, enter at current price).
-            # Stop-loss child at ORL protects downside.
+            # entry_type from signal: "stop" (buy-stop at pivot),
+            # "market" (confirmed breakout), or "limit".
+            # Stop-loss child at consolidation floor protects downside.
             # Take-profit at entry + 3× risk as a generous ceiling.
             # Our PositionManager will typically exit before this via
             # trailing SMA, Day 3 trim, or parabolic extension rules.
@@ -293,6 +293,7 @@ class Executor:
                 order_kwargs["stop_price"] = signal.entry_price
             elif signal.entry_type == "limit":
                 order_kwargs["limit_price"] = signal.entry_price
+            # "market" needs no extra kwargs — alpaca_client handles it
 
             order = self._client.submit_bracket_order(**order_kwargs)
             order_id = str(order.id) if hasattr(order, "id") else str(order)
