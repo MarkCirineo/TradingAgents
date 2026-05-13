@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "alpaca_paper": True,
     # Trading schedule (Eastern Time)
     "trading_schedule": {
-        "pre_market": "08:00",              # Screener + regime check
+        "pre_market": "07:55",              # Screener + regime check
         "analyze": "08:05",                 # LLM/quant pipeline (runs before open)
         "entry_window": "09:45",            # ORH/ORL buy-stop orders
         "midday_check": "12:00",            # Day 3 trims, parabolic exits
