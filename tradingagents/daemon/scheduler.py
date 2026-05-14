@@ -10,7 +10,7 @@ the ``DailyWorkflow`` at those times on market days.
 Schedule (Eastern Time):
     7:55 AM   pre_market       — screener + regime check
     8:05 AM   analyze          — LLM/quant pipeline → store decisions
-    9:45 AM   entry_window     — fetch ORH/ORL → submit buy-stop orders
+    9:30 AM   execute_entries  — submit buy-stop orders at consolidation pivot
    12:00 PM   midday_check     — Day 3 trims, parabolic exits
     3:45 PM   eod_check        — Day 1 red close, trailing SMA, stops
     4:15 PM   post_market      — daily snapshot + summary
@@ -58,7 +58,7 @@ class TradingDaemon:
         jobs = [
             ("pre_market",   schedule.get("pre_market", "07:55"),   self._workflow.pre_market),
             ("analyze",      schedule.get("analyze", "08:05"),      self._workflow.analyze),
-            ("entry_window", schedule.get("entry_window", "09:45"), self._workflow.entry_window),
+            ("execute_entries", schedule.get("execute_entries", "09:30"), self._workflow.execute_entries),
             ("midday_check", schedule.get("midday_check", "12:00"), self._workflow.midday_check),
             ("eod_check",    schedule.get("eod_check", "15:45"),    self._workflow.eod_check),
             ("post_market",  schedule.get("post_market", "16:15"),  self._workflow.post_market),
@@ -139,14 +139,14 @@ class TradingDaemon:
         print(f"  Buy signals: {buy_count}/{len(ctx.pipeline_decisions)}")
         print()
 
-        # Step 3: Entry window (ORH/ORL)
+        # Step 3: Execute entries (pivot breakout)
         print("=" * 60)
-        print("STEP 3/6: Entry Window (ORH/ORL buy-stop orders)")
+        print("STEP 3/6: Execute Entries (pivot breakout orders)")
         print("=" * 60)
-        ctx = self._workflow.entry_window()
+        ctx = self._workflow.execute_entries()
         print(f"  Entries submitted: {len(ctx.entries_submitted)}")
         for e in ctx.entries_submitted:
-            print(f"    {e['symbol']}: {e['shares']} shares, buy-stop @ ${e['entry']:.2f}, stop @ ${e['stop']:.2f}")
+            print(f"    {e['symbol']}: {e['shares']} shares @ ${e['entry']:.2f}, stop @ ${e['stop']:.2f}")
         print()
 
         # Step 4: Midday check

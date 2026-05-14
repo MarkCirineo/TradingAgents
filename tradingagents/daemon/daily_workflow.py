@@ -4,7 +4,7 @@ Each function maps to a time slot in the trading day:
 
     7:55 AM  pre_market()     — screener + regime check + pre-filter
     8:05 AM  analyze()        — LLM/quant pipeline → store decisions
-    9:45 AM  entry_window()   — fetch ORH/ORL → submit buy-stop orders
+    9:30 AM  execute_entries()  — submit buy-stop orders at consolidation pivot
    12:00 PM  midday_check()   — Day 3 trims, parabolic extension exits
     3:45 PM  eod_check()      — Day 1 red close, trailing SMA, stop updates
     4:15 PM  post_market()    — daily snapshot, increment day counts, log summary
@@ -37,6 +37,7 @@ class DayContext:
     regime_favorable: bool = False
     candidates: List[str] = field(default_factory=list)
     pipeline_decisions: Dict[str, str] = field(default_factory=dict)
+    pivot_levels: Dict[str, dict] = field(default_factory=dict)
     entries_submitted: List[Dict[str, Any]] = field(default_factory=list)
     exits_executed: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -131,12 +132,30 @@ class DailyWorkflow:
         filtered = pf.filter_candidates(symbols)
 
         self._ctx.candidates = [r.symbol for r in filtered]
+
+        # Extract pivot levels from filter results for use at entry time
+        for r in filtered:
+            ph = r.checks.get("pivot_high")
+            pl = r.checks.get("pivot_low")
+            if ph and pl:
+                self._ctx.pivot_levels[r.symbol] = {
+                    "pivot_high": ph,
+                    "pivot_low": pl,
+                    "tight_days": r.checks.get("tight_days", 0),
+                }
+
         logger.info(
             "Pre-market: %d screened -> %d passed pre-filter: %s",
             len(candidates),
             len(filtered),
             self._ctx.candidates,
         )
+        if self._ctx.pivot_levels:
+            for sym, piv in self._ctx.pivot_levels.items():
+                logger.info(
+                    "  %s: pivot=$%.2f, floor=$%.2f (%d tight days)",
+                    sym, piv["pivot_high"], piv["pivot_low"], piv["tight_days"],
+                )
 
         # Log to trade DB
         try:
@@ -159,7 +178,7 @@ class DailyWorkflow:
 
         This runs BEFORE market open to give the LLM plenty of time.
         Decisions are stored in ``self._ctx.pipeline_decisions`` and
-        consumed by ``entry_window()`` at 9:45 AM.
+        consumed by ``execute_entries()`` at 9:30 AM.
         """
         if self._ctx is None:
             logger.error("analyze called before pre_market")
@@ -188,7 +207,7 @@ class DailyWorkflow:
         else:
             pipeline_results = self._llm_pipeline_batch(candidates)
 
-        # Store decisions for entry_window to consume
+        # Store decisions for execute_entries to consume
         for symbol in candidates:
             decision = pipeline_results.get(symbol)
             if decision is not None:
@@ -212,22 +231,23 @@ class DailyWorkflow:
         )
         return self._ctx
 
-    # -- 9:45 AM: Entry window (ORH/ORL execution) --------------------------
+    # -- 9:30 AM: Execute entries (consolidation pivot breakouts) -----------
 
-    def entry_window(self) -> DayContext:
-        """Execute entries using Opening Range breakout logic.
+    def execute_entries(self) -> DayContext:
+        """Execute entries using consolidation pivot breakout logic.
 
         Reads pre-computed decisions from ``analyze()`` and for each
         "buy" signal:
-          1. Fetches 1-min intraday bars for the opening range window
-          2. Computes ORH (Opening Range High) and ORL (Opening Range Low)
-          3. Submits a buy-stop order at ORH with stop-loss at ORL
+          1. Looks up the consolidation pivot (computed in pre_market)
+          2. Checks current price vs pivot to determine order type
+          3. Submits buy-stop at pivot_high or market order if confirmed
 
-        The buy-stop only fills if price breaks above ORH during the day.
-        If ORH is never breached, the order expires at market close.
+        The buy-stop only fills if price breaks above the consolidation
+        ceiling during the day. If the pivot is never breached, the
+        order expires at market close.
         """
         if self._ctx is None:
-            logger.error("entry_window called before pre_market")
+            logger.error("execute_entries called before pre_market")
             return DayContext()
 
         if not self._ctx.regime_favorable:
@@ -253,49 +273,53 @@ class DailyWorkflow:
             s for s, d in self._ctx.pipeline_decisions.items() if d == "buy"
         ]
         logger.info(
-            "Entry window: %d BUY decisions to execute via ORH breakout",
+            "Execute entries: %d BUY decisions to execute via pivot breakout",
             len(buy_symbols),
         )
 
         for symbol in buy_symbols:
             try:
-                # Calculate ORH/ORL from today's opening range
-                orh, orl = self._calculate_orh_orl(symbol)
-                if orh <= 0 or orl <= 0:
-                    logger.warning("%s: invalid ORH/ORL — skipping", symbol)
+                # 1. Look up pre-computed consolidation pivot
+                pivot = self._ctx.pivot_levels.get(symbol)
+                if not pivot:
+                    logger.info(
+                        "%s: no consolidation pivot — SKIP (not A+ setup)",
+                        symbol,
+                    )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result="error:orh_orl",
+                        selected_for_pipeline=True, signal_result="skip:no_pivot",
                     )
                     continue
 
-                if orl >= orh:
+                pivot_high = pivot["pivot_high"]
+                pivot_low = pivot["pivot_low"]
+                risk_per_share = pivot_high - pivot_low
+
+                if risk_per_share <= 0:
                     logger.warning(
-                        "%s: ORL ($%.2f) >= ORH ($%.2f) — flat opening range, skipping",
-                        symbol, orl, orh,
+                        "%s: invalid pivot range (high=$%.2f, low=$%.2f) — SKIP",
+                        symbol, pivot_high, pivot_low,
                     )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result="skip:flat_range",
+                        selected_for_pipeline=True, signal_result="skip:invalid_pivot_range",
                     )
                     continue
 
                 logger.info(
-                    "%s: ORH=$%.2f, ORL=$%.2f — checking current price",
-                    symbol, orh, orl,
+                    "%s: pivot=$%.2f, floor=$%.2f, risk=$%.2f (%d tight days)",
+                    symbol, pivot_high, pivot_low, risk_per_share,
+                    pivot.get("tight_days", 0),
                 )
 
-                # Check current price relative to ORH to determine order type.
-                # If price is already above ORH, a buy-stop at ORH would either
-                # immediately fill at a worse price or get rejected by Alpaca.
-                risk_per_share = orh - orl
+                # 2. Get current price
                 try:
                     snap = self._data_client.get_snapshots([symbol])
                     current_price = float(snap[symbol].latest_trade.price)
                 except Exception as exc:
-                    # Can't determine current price — skip to avoid blind ordering
                     logger.warning(
                         "%s: price lookup failed (%s) — skipping entry",
                         symbol, exc,
@@ -307,46 +331,48 @@ class DailyWorkflow:
                     )
                     continue
 
-                if current_price < orl:
-                    # Range broke down — skip entry
+                # 3. Determine order type based on current price vs pivot
+                if current_price < pivot_low:
+                    # Broke below consolidation floor — setup invalidated
                     logger.info(
-                        "%s: price $%.2f < ORL $%.2f — range breakdown, skipping",
-                        symbol, current_price, orl,
+                        "%s: price $%.2f < floor $%.2f — breakdown, SKIP",
+                        symbol, current_price, pivot_low,
                     )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
                         source="hybrid_screener", score=1.0,
-                        selected_for_pipeline=True, signal_result="skip:range_breakdown",
+                        selected_for_pipeline=True, signal_result="skip:breakdown",
                     )
                     continue
 
-                elif current_price <= orh:
-                    # Normal case: price still below ORH — submit buy-stop
+                elif current_price <= pivot_high:
+                    # Still in consolidation — buy-stop at pivot
                     entry_type = "stop"
-                    entry_price = orh
+                    entry_price = pivot_high
                     logger.info(
-                        "%s: price $%.2f <= ORH $%.2f — buy-stop at ORH",
-                        symbol, current_price, orh,
+                        "%s: price $%.2f <= pivot $%.2f — buy-stop at pivot",
+                        symbol, current_price, pivot_high,
                     )
 
-                elif current_price <= orh + risk_per_share:
-                    # Breakout already confirmed but not extended — enter at market
-                    # Recalculate sizing with actual risk = current_price - ORL
-                    entry_type = "limit"
+                elif current_price <= pivot_high + risk_per_share:
+                    # Breakout confirmed but not extended — market order
+                    # Doc line 370: "I always use mrkt orders"
+                    entry_type = "market"
                     entry_price = round(current_price, 2)
                     logger.info(
-                        "%s: price $%.2f > ORH $%.2f (breakout confirmed) — "
-                        "limit entry at $%.2f",
-                        symbol, current_price, orh, entry_price,
+                        "%s: price $%.2f > pivot $%.2f (breakout confirmed) — "
+                        "market order",
+                        symbol, current_price, pivot_high,
                     )
 
                 else:
-                    # Too extended — chasing territory, skip
+                    # Too extended above pivot — chasing territory
+                    # Doc line 815: "Do not chase"
                     logger.info(
-                        "%s: price $%.2f >> ORH $%.2f (extended by $%.2f > "
-                        "risk $%.2f) — skipping to avoid chasing",
-                        symbol, current_price, orh,
-                        current_price - orh, risk_per_share,
+                        "%s: price $%.2f >> pivot $%.2f (extended by $%.2f > "
+                        "risk $%.2f) — SKIP (chasing)",
+                        symbol, current_price, pivot_high,
+                        current_price - pivot_high, risk_per_share,
                     )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,
@@ -359,10 +385,10 @@ class DailyWorkflow:
                     symbol=symbol,
                     action="buy",
                     entry_price=entry_price,
-                    stop_price=orl,    # stop-loss at ORL
+                    stop_price=pivot_low,  # stop at consolidation floor
                     rationale=(
-                        f"ORH breakout ({entry_type}): entry @ ${entry_price:.2f}, "
-                        f"stop @ ${orl:.2f}"
+                        f"Pivot breakout ({entry_type}): entry @ ${entry_price:.2f}, "
+                        f"stop @ ${pivot_low:.2f}, tight_days={pivot.get('tight_days', 0)}"
                     ),
                     entry_type=entry_type,
                 )
@@ -377,8 +403,9 @@ class DailyWorkflow:
                         "value": result.position_value,
                     })
                     logger.info(
-                        "ENTRY: %s — %d shares, buy-stop @ $%.2f, stop @ $%.2f",
-                        symbol, result.shares, result.entry_price, result.stop_price,
+                        "ENTRY: %s — %d shares, %s @ $%.2f, stop @ $%.2f",
+                        symbol, result.shares, entry_type,
+                        result.entry_price, result.stop_price,
                     )
                     self._trade_db.log_screening_result(
                         date=self._ctx.date, symbol=symbol,

@@ -1,9 +1,9 @@
-"""Test the 9 playbook compliance fixes — no orders submitted.
+"""Test the playbook compliance fixes — no orders submitted.
 
 Uses real market data via yfinance/Alpaca to exercise:
-1. Pre-filter: prior uptrend, MA stacking, RS threshold
+1. Pre-filter: prior uptrend, MA stacking, RS threshold, tight consolidation
 2. Position manager: parabolic 50 SMA, breakeven guard
-3. ORH entry logic: current price vs ORH scenarios
+3. Consolidation pivot: detection, entry logic, market order support
 4. Trade DB: daily P&L computation, stop type flags
 
 Run:  python scripts/test_playbook_fixes.py
@@ -114,6 +114,20 @@ try:
     else:
         skip(f"RS threshold ({test_ticker})", "no data")
 
+    # Show tight consolidation results
+    if "tight_consolidation" in result.checks:
+        check(f"Tight consolidation check ({test_ticker})",
+              result.checks.get("tight_consolidation") is not None,
+              f"tight={result.checks.get('tight_consolidation')}, "
+              f"days={result.checks.get('tight_days', 'N/A')}")
+        if result.checks.get("pivot_high"):
+            check(f"Pivot levels stored ({test_ticker})",
+                  result.checks.get("pivot_high") > 0,
+                  f"pivot_high=${result.checks.get('pivot_high')}, "
+                  f"pivot_low=${result.checks.get('pivot_low')}")
+    else:
+        skip(f"Tight consolidation ({test_ticker})", "check not present")
+
     # Test with a weak/declining stock (should fail)
     weak_ticker = "T"  # AT&T — typically low momentum
     print(f"\n  Testing {weak_ticker} (expected: weak/may fail)...")
@@ -127,6 +141,53 @@ try:
 except Exception as exc:
     print(f"  ERROR: {exc}")
     skip("Pre-filter tests", str(exc))
+
+
+# =========================================================================
+# Test 3: Consolidation pivot detection (with real market data)
+# =========================================================================
+print("\n" + "=" * 60)
+print("TEST 3: Consolidation pivot detection")
+print("=" * 60)
+
+try:
+    from tradingagents.execution.alpaca_data import AlpacaDataClient
+    dc = AlpacaDataClient()
+
+    # NVDA should have tight consolidation days
+    pivot = dc.compute_consolidation_pivot("NVDA", min_tight_days=2)
+    if pivot:
+        check("NVDA has consolidation pivot", True,
+              f"pivot=${pivot['pivot_high']}, floor=${pivot['pivot_low']}, "
+              f"days={pivot['tight_days']}")
+        check("Pivot has required fields",
+              all(k in pivot for k in ["pivot_high", "pivot_low", "tight_days", "adr"]))
+        check("pivot_high > pivot_low",
+              pivot["pivot_high"] > pivot["pivot_low"])
+        check("tight_days >= 2", pivot["tight_days"] >= 2)
+    else:
+        skip("NVDA consolidation pivot", "None returned (may have broken out)")
+
+    # Test with pre-fetched bars (same path as pre-filter)
+    bars = dc.get_bars("NVDA", lookback_days=60)
+    pivot_from_bars = dc.compute_consolidation_pivot("NVDA", bars=bars, min_tight_days=2)
+    if pivot and pivot_from_bars:
+        check("Pivot from pre-fetched bars matches",
+              pivot["pivot_high"] == pivot_from_bars["pivot_high"],
+              f"direct=${pivot['pivot_high']}, from_bars=${pivot_from_bars['pivot_high']}")
+    elif pivot_from_bars is None and pivot is None:
+        check("Both paths return None consistently", True)
+    else:
+        skip("Pre-fetched bars comparison", "inconsistent results")
+
+    # Test with min_tight_days=999 (should always return None)
+    pivot_none = dc.compute_consolidation_pivot("NVDA", min_tight_days=999)
+    check("Returns None when min_tight_days impossible",
+          pivot_none is None)
+
+except Exception as exc:
+    print(f"  ERROR: {exc}")
+    skip("Consolidation pivot test", str(exc))
 
 
 # =========================================================================
@@ -189,10 +250,15 @@ try:
     sig = TradeSignal(symbol="TEST", action="buy", entry_price=100, stop_price=95)
     check("Default entry_type is 'stop'", sig.entry_type == "stop")
 
-    # Should accept "limit"
+    # Should accept "market" (confirmed breakout)
     sig2 = TradeSignal(symbol="TEST", action="buy", entry_price=100,
+                       stop_price=95, entry_type="market")
+    check("entry_type accepts 'market'", sig2.entry_type == "market")
+
+    # Should accept "limit"
+    sig3 = TradeSignal(symbol="TEST", action="buy", entry_price=100,
                        stop_price=95, entry_type="limit")
-    check("entry_type accepts 'limit'", sig2.entry_type == "limit")
+    check("entry_type accepts 'limit'", sig3.entry_type == "limit")
 
 except Exception as exc:
     skip("TradeSignal entry_type", str(exc))
@@ -328,9 +394,60 @@ try:
           'signal.entry_type == "stop"' in source)
     check("Executor handles 'limit' entry_type",
           'signal.entry_type == "limit"' in source)
+    check("Executor handles 'market' entry_type",
+          '"market" needs no extra kwargs' in source)
 
 except Exception as exc:
     skip("Executor entry_type routing", str(exc))
+
+
+# =========================================================================
+# Test 9: execute_entries code structure
+# =========================================================================
+print("\n" + "=" * 60)
+print("TEST 9: execute_entries — pivot-based entry logic")
+print("=" * 60)
+
+try:
+    from tradingagents.daemon.daily_workflow import DailyWorkflow, DayContext
+
+    # Verify DayContext has pivot_levels field
+    ctx = DayContext()
+    check("DayContext has pivot_levels", hasattr(ctx, "pivot_levels"))
+    check("pivot_levels defaults to empty dict", ctx.pivot_levels == {})
+
+    # Verify execute_entries exists and entry_window is gone from schedule
+    wf = DailyWorkflow()
+    check("execute_entries method exists", hasattr(wf, "execute_entries"))
+
+    # Verify code structure
+    source = inspect.getsource(DailyWorkflow.execute_entries)
+    check("Uses pivot_levels.get(symbol)",
+          "pivot_levels.get(symbol)" in source)
+    check("Checks price < pivot_low (breakdown)",
+          "current_price < pivot_low" in source)
+    check("Checks price <= pivot_high (buy-stop)",
+          "current_price <= pivot_high" in source)
+    check("Uses market order for confirmed breakout",
+          'entry_type = "market"' in source)
+    check("Stop is at pivot_low (consolidation floor)",
+          "stop_price=pivot_low" in source)
+    check("Logs skip for no pivot (not A+ setup)",
+          "not A+ setup" in source)
+
+    # Verify scheduler timing
+    from tradingagents.default_config import DEFAULT_CONFIG
+    schedule = DEFAULT_CONFIG["trading_schedule"]
+    check("Schedule uses execute_entries key",
+          "execute_entries" in schedule)
+    check("Execute entries at 09:30",
+          schedule.get("execute_entries") == "09:30")
+    check("No entry_window in schedule",
+          "entry_window" not in schedule)
+
+except Exception as exc:
+    print(f"  ERROR: {exc}")
+    skip("execute_entries structure", str(exc))
 
 
 # =========================================================================

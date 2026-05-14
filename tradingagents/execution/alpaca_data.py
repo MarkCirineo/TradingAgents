@@ -248,6 +248,87 @@ class AlpacaDataClient:
         daily_range_pct = (df["high"] - df["low"]) / df["close"]
         return float(daily_range_pct.tail(period).mean())
 
+    def compute_consolidation_pivot(
+        self,
+        symbol: str,
+        bars: Optional[pd.DataFrame] = None,
+        adr_period: int = 14,
+        tight_ratio: float = 2 / 3,
+        lookback_days: int = 100,
+        recent_window: int = 20,
+        min_tight_days: int = 2,
+    ) -> Optional[dict]:
+        """Detect consolidation resistance from tight daily bars.
+
+        A "tight day" has a daily range (high - low) <= ``tight_ratio`` * ADR.
+        This is the doc's definition: *"Daily Range <= 2/3 * ADR"*.
+
+        Looks at the most recent ``recent_window`` trading days and finds
+        all tight days.  Returns the highest high (entry trigger / resistance
+        ceiling) and lowest low (stop level / consolidation floor).
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol.
+        bars : pd.DataFrame, optional
+            Pre-fetched daily bars to avoid redundant API calls.
+            If ``None``, bars are fetched internally.
+        adr_period : int
+            Number of days for Average Daily Range calculation.
+        tight_ratio : float
+            Multiple of ADR that defines "tight" (default 2/3).
+        lookback_days : int
+            How far back to fetch bars (when *bars* is ``None``).
+        recent_window : int
+            Only consider tight days within this many recent trading days.
+        min_tight_days : int
+            Minimum number of tight days required.  Returns ``None``
+            if fewer tight days are found (stock is not consolidating).
+
+        Returns
+        -------
+        dict or None
+            ``{"pivot_high", "pivot_low", "tight_days", "adr"}`` if a
+            valid consolidation is detected, otherwise ``None``.
+        """
+        if bars is None:
+            bars = self.get_bars(symbol, lookback_days=lookback_days)
+        if bars.empty:
+            return None
+
+        if isinstance(bars.index, pd.MultiIndex):
+            try:
+                bars = bars.xs(symbol, level="symbol")
+            except KeyError:
+                return None
+
+        if len(bars) < adr_period:
+            return None
+
+        # Compute ADR
+        bars = bars.copy()
+        bars["daily_range"] = bars["high"] - bars["low"]
+        adr = float(bars["daily_range"].tail(adr_period).mean())
+        if adr <= 0:
+            return None
+
+        tight_threshold = adr * tight_ratio
+
+        # Find tight days in the recent window
+        recent = bars.tail(recent_window)
+        tight = recent[recent["daily_range"] <= tight_threshold]
+
+        if len(tight) < min_tight_days:
+            return None
+
+        return {
+            "pivot_high": round(float(tight["high"].max()), 2),
+            "pivot_low": round(float(tight["low"].min()), 2),
+            "tight_days": len(tight),
+            "adr": round(adr, 2),
+        }
+
     def compute_relative_strength(
         self,
         symbol: str,

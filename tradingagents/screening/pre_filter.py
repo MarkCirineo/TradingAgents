@@ -12,6 +12,7 @@ wisdom lives in code:
 - Prior uptrend (>= 30% gain over 60 days)
 - MA stacking (10 SMA > 20 SMA > 50 SMA -- bullish stack)
 - Volume contraction (consolidation signal)
+- Tight consolidation (>= 2 days with range <= 2/3 ADR; provides pivot levels)
 - Already-held filter (skip if we have an open position)
 """
 
@@ -277,9 +278,32 @@ class PreFilter:
             checks["ma_stacking"] = False
             reject_reasons.append(f"MA stacking error: {exc}")
 
+        # 9. Tight consolidation (doc: "Daily Range <= 2/3 * ADR", min 2 days)
+        #    Uses bars_60d already fetched in check #6 — zero extra API calls.
+        #    Provides pivot_high (entry trigger) and pivot_low (stop level).
+        try:
+            pivot = self.data_client.compute_consolidation_pivot(
+                symbol, bars=bars_60d, min_tight_days=2,
+            )
+            if pivot:
+                checks["tight_consolidation"] = True
+                checks["pivot_high"] = pivot["pivot_high"]
+                checks["pivot_low"] = pivot["pivot_low"]
+                checks["tight_days"] = pivot["tight_days"]
+                score += 1.0
+            else:
+                checks["tight_consolidation"] = False
+                reject_reasons.append(
+                    "no tight consolidation (< 2 days with range <= 2/3 ADR)"
+                )
+        except Exception as exc:
+            logger.warning("Tight consolidation check failed for %s: %s", symbol, exc)
+            checks["tight_consolidation"] = False
+            reject_reasons.append(f"consolidation check error: {exc}")
+
         # Determine pass/fail
         # Must pass: not already held, dollar volume, ADR, price range,
-        # relative strength, prior uptrend, MA stacking
+        # relative strength, prior uptrend, MA stacking, tight consolidation
         required_checks = [
             checks.get("already_held", False),
             checks.get("dollar_volume", False),
@@ -288,6 +312,7 @@ class PreFilter:
             checks.get("relative_strength", False),
             checks.get("prior_uptrend", False),
             checks.get("ma_stacking", False),
+            checks.get("tight_consolidation", False),
         ]
         passed = all(required_checks)
 
