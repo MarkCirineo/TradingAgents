@@ -302,6 +302,11 @@ class DailyWorkflow:
                         "%s: invalid pivot range (high=$%.2f, low=$%.2f) — SKIP",
                         symbol, pivot_high, pivot_low,
                     )
+                    self._trade_db.log_screening_result(
+                        date=self._ctx.date, symbol=symbol,
+                        source="hybrid_screener", score=1.0,
+                        selected_for_pipeline=True, signal_result="skip:invalid_pivot_range",
+                    )
                     continue
 
                 logger.info(

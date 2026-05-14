@@ -260,8 +260,8 @@ class AlpacaDataClient:
     ) -> Optional[dict]:
         """Detect consolidation resistance from tight daily bars.
 
-        A "tight day" has a daily range (high − low) ≤ ``tight_ratio`` × ADR.
-        This is the doc's definition: *"Daily Range ≤ 2/3 × ADR"*.
+        A "tight day" has a daily range (high - low) <= ``tight_ratio`` * ADR.
+        This is the doc's definition: *"Daily Range <= 2/3 * ADR"*.
 
         Looks at the most recent ``recent_window`` trading days and finds
         all tight days.  Returns the highest high (entry trigger / resistance
