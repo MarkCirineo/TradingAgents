@@ -565,6 +565,12 @@ class DailyWorkflow:
         # This cleans up stale test data and positions closed externally.
         self._reconcile_positions()
 
+        # Safety net: ensure every open position has a GTC stop order.
+        # With GTC brackets (Change #5), positions already have baseline
+        # protection.  This catches edge cases where EOD stop updates
+        # cancelled the old stop but failed to place a new one.
+        self._ensure_stops()
+
         # Increment day counts for all open positions
         try:
             positions = self._trade_db.get_open_positions()
@@ -659,6 +665,72 @@ class DailyWorkflow:
             logger.info("Reconciled %d stale position(s)", synced)
         else:
             logger.debug("Position reconciliation: all %d DB positions match Alpaca", len(db_open))
+
+    def _ensure_stops(self):
+        """Safety net: ensure every open position has a GTC stop order.
+
+        Runs in ``post_market`` after reconciliation.  With GTC brackets,
+        positions already have baseline stop protection from entry.  This
+        catches edge cases where EOD stop updates cancelled the old stop
+        but failed to place a new one.
+        """
+        if not self._alpaca_client or not self._trade_db:
+            return
+
+        from alpaca.trading.enums import OrderSide
+
+        try:
+            positions = self._alpaca_client.get_all_positions()
+        except Exception as exc:
+            logger.warning("_ensure_stops skipped — could not fetch positions: %s", exc)
+            return
+
+        for pos in positions:
+            symbol = pos.symbol
+            try:
+                open_orders = self._alpaca_client.get_orders(symbols=[symbol])
+                has_stop = any(
+                    "stop" in str(getattr(o, "type", "")).lower()
+                    for o in open_orders
+                )
+                if has_stop:
+                    continue  # already protected
+
+                # Look up the stop price from our DB
+                db_pos = self._trade_db.get_position(symbol)
+                stop_price = db_pos.get("entry_orl", 0) if db_pos else 0
+                if stop_price <= 0:
+                    logger.warning(
+                        "SAFETY NET: %s has no stop and no DB stop price — SKIPPED",
+                        symbol,
+                    )
+                    continue
+
+                qty = float(pos.qty)
+                new_order = self._alpaca_client.submit_stop_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    stop_price=stop_price,
+                    # GTC is the default
+                )
+                logger.warning(
+                    "SAFETY NET: placed GTC stop for %s @ $%.2f, qty=%d "
+                    "(no existing stop found) — order %s",
+                    symbol, stop_price, int(qty),
+                    getattr(new_order, "id", "?"),
+                )
+                notify(
+                    "stop_update",
+                    symbol=symbol,
+                    new_stop=stop_price,
+                    reason="safety net: no stop found in post_market",
+                )
+            except Exception as exc:
+                logger.error(
+                    "SAFETY NET: failed to ensure stop for %s: %s",
+                    symbol, exc,
+                )
 
     # -- helpers ------------------------------------------------------------
 
@@ -791,6 +863,8 @@ class DailyWorkflow:
         Before closing, cancels any open orders for the symbol (bracket
         child legs lock the shares and must be removed first).
         """
+        import time
+
         try:
             # Cancel any open orders for this symbol first.
             # Bracket order children (stop-loss, take-profit) lock the
@@ -811,9 +885,6 @@ class DailyWorkflow:
                             "Could not cancel order %s: %s",
                             order.id, cancel_exc,
                         )
-                if open_orders:
-                    import time
-                    time.sleep(0.5)  # let Alpaca process cancellations
             except Exception as exc:
                 logger.warning(
                     "Could not fetch/cancel orders for %s: %s",
@@ -821,11 +892,36 @@ class DailyWorkflow:
                 )
 
             if action.action == "exit_full":
-                self._alpaca_client.close_position(action.symbol)
-                logger.info("EXIT FULL: %s — %s", action.symbol, action.reason)
-                notify("exit", symbol=action.symbol, action="exit_full", reason=action.reason)
+                # Retry with backoff — Alpaca processes bracket child
+                # cancellations asynchronously, shares may still be locked.
+                max_attempts = 5
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        self._alpaca_client.close_position(action.symbol)
+                        logger.info("EXIT FULL: %s — %s", action.symbol, action.reason)
+                        notify("exit", symbol=action.symbol, action="exit_full", reason=action.reason)
+                        break
+                    except Exception as close_exc:
+                        close_msg = str(close_exc).lower()
+                        is_retryable = any(
+                            kw in close_msg
+                            for kw in ("cannot", "locked", "available", "insufficient", "held")
+                        )
+                        if attempt < max_attempts and is_retryable:
+                            wait = 1.0 * attempt  # 1s, 2s, 3s, 4s
+                            logger.warning(
+                                "close_position attempt %d/%d for %s failed (%s) "
+                                "— retrying in %.0fs",
+                                attempt, max_attempts, action.symbol,
+                                close_exc, wait,
+                            )
+                            time.sleep(wait)
+                        else:
+                            raise  # re-raise to hit the outer except handler
+
             elif action.action == "exit_partial":
                 # Get current position to calculate shares to sell
+                time.sleep(1.0)  # brief pause after order cancellations
                 pos = self._alpaca_client.get_position(action.symbol)
                 if pos:
                     import math
@@ -874,36 +970,101 @@ class DailyWorkflow:
                 notify("error", message=f"Exit failed for {action.symbol}: {exc}")
 
     def _execute_stop_update(self, action):
-        """Update a stop order to a new price."""
+        """Update a stop by cancelling existing orders and placing a new GTC stop.
+
+        We cancel-and-resubmit rather than using ``replace_stop_order``
+        because this approach is idempotent — it works regardless of
+        whether the existing orders are bracket children from entry or
+        standalone stops from a previous update.  It also produces a
+        clean, independent GTC stop with a known order ID we track in
+        the DB, and removes stale take-profit ceilings so that
+        PositionManager has full exit control.
+
+        Steps:
+        1. Cancel ALL open orders for the symbol
+        2. Wait for Alpaca to process cancellations
+        3. Submit a new standalone GTC stop order
+        4. Update the DB with the new stop price and order ID
+        """
         if action.new_stop is None:
             return
+
+        import time
+        from alpaca.trading.enums import OrderSide
+
         try:
-            # Find the open stop order for this symbol
+            # 1. Cancel all open orders for this symbol (bracket children)
             orders = self._alpaca_client.get_orders(symbols=[action.symbol])
+            cancelled_count = 0
             for order in orders:
-                if hasattr(order, "type") and "stop" in str(order.type).lower():
-                    self._alpaca_client.replace_stop_order(
-                        order_id=str(order.id),
-                        new_stop_price=action.new_stop,
-                    )
+                try:
+                    self._alpaca_client.cancel_order(str(order.id))
                     logger.info(
-                        "STOP UPDATED: %s -> $%.2f — %s",
-                        action.symbol, action.new_stop, action.reason,
+                        "Cancelled %s order %s for %s (stop update)",
+                        getattr(order, "type", "?"), order.id, action.symbol,
                     )
-                    notify("stop_update", symbol=action.symbol, new_stop=action.new_stop, reason=action.reason)
-                    # Determine stop type from reason for audit trail
-                    if "breakeven" in action.reason.lower():
-                        stop_type = "breakeven"
-                    elif "trailing" in action.reason.lower() or "SMA" in action.reason:
-                        stop_type = "trailing"
-                    elif "LOD" in action.reason:
-                        stop_type = "lod"
-                    else:
-                        stop_type = ""
-                    # Update in DB with stop type flag
-                    if self._trade_db:
-                        self._trade_db.update_stop(action.symbol, action.new_stop, stop_type=stop_type)
-                    break
+                    cancelled_count += 1
+                except Exception as cancel_exc:
+                    logger.warning(
+                        "Could not cancel order %s: %s", order.id, cancel_exc,
+                    )
+
+            if cancelled_count > 0:
+                time.sleep(1.0)  # let Alpaca process cancellations
+
+            # 2. Get current position to determine qty for the new stop
+            pos = self._alpaca_client.get_position(action.symbol)
+            if not pos:
+                logger.warning(
+                    "No Alpaca position for %s — cannot place new stop",
+                    action.symbol,
+                )
+                return
+
+            qty = float(pos.qty)
+
+            # 3. Submit new standalone GTC stop order
+            new_order = self._alpaca_client.submit_stop_order(
+                symbol=action.symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                stop_price=action.new_stop,
+                # GTC is the default in submit_stop_order
+            )
+
+            logger.info(
+                "STOP UPDATED: %s -> $%.2f (new GTC stop %s) — %s",
+                action.symbol, action.new_stop,
+                getattr(new_order, "id", "?"), action.reason,
+            )
+            notify(
+                "stop_update",
+                symbol=action.symbol,
+                new_stop=action.new_stop,
+                reason=action.reason,
+            )
+
+            # 4. Determine stop type from reason for audit trail
+            if "breakeven" in action.reason.lower():
+                stop_type = "breakeven"
+            elif "trailing" in action.reason.lower() or "SMA" in action.reason:
+                stop_type = "trailing"
+            elif "LOD" in action.reason:
+                stop_type = "lod"
+            else:
+                stop_type = ""
+
+            # Update in DB with stop type flag and new order ID
+            if self._trade_db:
+                self._trade_db.update_stop(
+                    action.symbol, action.new_stop, stop_type=stop_type,
+                )
+                # Track the new stop order ID
+                self._trade_db.update_position(
+                    action.symbol,
+                    stop_order_id=str(getattr(new_order, "id", "")),
+                )
+
         except Exception as exc:
             logger.error("Stop update failed for %s: %s", action.symbol, exc)
             notify("error", message=f"Stop update failed for {action.symbol}: {exc}")

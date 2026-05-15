@@ -237,7 +237,7 @@ class AlpacaClient:
         stop_price: Optional[float] = None,
         stop_loss_price: Optional[float] = None,
         take_profit_price: Optional[float] = None,
-        time_in_force: TimeInForce = TimeInForce.DAY,
+        time_in_force: TimeInForce = TimeInForce.GTC,
     ):
         """Submit a bracket order with attached stop-loss (and optional take-profit).
 

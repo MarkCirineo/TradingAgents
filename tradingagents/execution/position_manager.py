@@ -106,7 +106,7 @@ class PositionManager:
         """
         symbol = pos["symbol"]
         entry_price = pos.get("entry_price", 0)
-        current_stop = pos.get("stop_price", 0)
+        current_stop = pos.get("entry_orl", 0)
         day_count = pos.get("day_count", 1)
         trimmed = pos.get("trimmed", False)
 
