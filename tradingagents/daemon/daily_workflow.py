@@ -1023,24 +1023,28 @@ class DailyWorkflow:
 
             qty = float(pos.qty)
 
+            # Round to 2 decimal places — Alpaca rejects sub-penny prices
+            # (SEC Rule 612) and SMA values are rolling means with fractional cents.
+            rounded_stop = round(action.new_stop, 2)
+
             # 3. Submit new standalone GTC stop order
             new_order = self._alpaca_client.submit_stop_order(
                 symbol=action.symbol,
                 qty=qty,
                 side=OrderSide.SELL,
-                stop_price=action.new_stop,
+                stop_price=rounded_stop,
                 # GTC is the default in submit_stop_order
             )
 
             logger.info(
                 "STOP UPDATED: %s -> $%.2f (new GTC stop %s) — %s",
-                action.symbol, action.new_stop,
+                action.symbol, rounded_stop,
                 getattr(new_order, "id", "?"), action.reason,
             )
             notify(
                 "stop_update",
                 symbol=action.symbol,
-                new_stop=action.new_stop,
+                new_stop=rounded_stop,
                 reason=action.reason,
             )
 

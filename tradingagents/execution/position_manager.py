@@ -203,7 +203,7 @@ class PositionManager:
                         symbol=symbol,
                         action="update_stop",
                         reason=f"Trailing stop raised to 10 SMA ${sma_10_val:.2f}",
-                        new_stop=sma_10_val,
+                        new_stop=round(sma_10_val, 2),
                     )
         except Exception:
             pass  # sma_10 might not be computed yet, skip
@@ -216,7 +216,7 @@ class PositionManager:
                     symbol=symbol,
                     action="update_stop",
                     reason=f"Stop raised to LOD ${latest_low:.2f}",
-                    new_stop=latest_low,
+                    new_stop=round(latest_low, 2),
                 )
             # Move to breakeven after first green close
             if latest_close > entry_price and current_stop < entry_price:
@@ -224,7 +224,7 @@ class PositionManager:
                     symbol=symbol,
                     action="update_stop",
                     reason=f"Stop moved to breakeven ${entry_price:.2f}",
-                    new_stop=entry_price,
+                    new_stop=round(entry_price, 2),
                 )
 
         # Rule 6: Soft backstop warning
