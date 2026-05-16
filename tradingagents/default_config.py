@@ -89,7 +89,7 @@ DEFAULT_CONFIG = {
         "watchlist": [],                    # Manual ticker list
         "max_candidates": int(os.getenv("MAX_CANDIDATES", "35")),
         "max_pipeline_runs": int(os.getenv("MAX_PIPELINE_RUNS", "15")),
-        "max_workers": int(os.getenv("MAX_WORKERS", "2")),
+        "max_workers": int(os.getenv("MAX_WORKERS", "1")),
     },
     # Swing trading strategy parameters (distilled from expert document)
     "swing_strategy": {
