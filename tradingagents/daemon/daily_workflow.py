@@ -673,6 +673,13 @@ class DailyWorkflow:
         positions already have baseline stop protection from entry.  This
         catches edge cases where EOD stop updates cancelled the old stop
         but failed to place a new one.
+
+        Stop price selection (best available):
+        1. Today's Low of Day (LOD) from market data — this is what the
+           PositionManager would have set if the update hadn't failed.
+        2. DB ``entry_orl`` — the last known stop (may still be original
+           entry stop if no update ever succeeded).
+        3. Skip if neither is available.
         """
         if not self._alpaca_client or not self._trade_db:
             return
@@ -696,16 +703,42 @@ class DailyWorkflow:
                 if has_stop:
                     continue  # already protected
 
-                # Look up the stop price from our DB
+                # Determine the best stop price:
+                # Prefer today's LOD (what position manager intended)
+                # over the stale DB entry_orl (which may be original entry stop).
                 db_pos = self._trade_db.get_position(symbol)
-                stop_price = db_pos.get("entry_orl", 0) if db_pos else 0
-                if stop_price <= 0:
+                db_stop = db_pos.get("entry_orl", 0) if db_pos else 0
+
+                # Fetch today's LOD from market data
+                lod = 0.0
+                try:
+                    bars = self._data_client.get_bars(symbol, lookback_days=5)
+                    import pandas as pd
+                    if isinstance(bars.index, pd.MultiIndex):
+                        bars = bars.xs(symbol, level="symbol")
+                    if not bars.empty:
+                        lod = float(bars["low"].iloc[-1])
+                except Exception as data_exc:
+                    logger.warning(
+                        "SAFETY NET: could not fetch LOD for %s: %s",
+                        symbol, data_exc,
+                    )
+
+                # Use LOD if it's a valid price, otherwise fall back to DB stop
+                if lod > 0:
+                    stop_price = lod
+                    stop_source = "LOD"
+                elif db_stop > 0:
+                    stop_price = db_stop
+                    stop_source = "DB entry_orl"
+                else:
                     logger.warning(
                         "SAFETY NET: %s has no stop and no DB stop price — SKIPPED",
                         symbol,
                     )
                     continue
 
+                stop_price = round(stop_price, 2)
                 qty = float(pos.qty)
                 new_order = self._alpaca_client.submit_stop_order(
                     symbol=symbol,
@@ -715,17 +748,26 @@ class DailyWorkflow:
                     # GTC is the default
                 )
                 logger.warning(
-                    "SAFETY NET: placed GTC stop for %s @ $%.2f, qty=%d "
+                    "SAFETY NET: placed GTC stop for %s @ $%.2f (source=%s), qty=%d "
                     "(no existing stop found) — order %s",
-                    symbol, stop_price, int(qty),
+                    symbol, stop_price, stop_source, int(qty),
                     getattr(new_order, "id", "?"),
                 )
                 notify(
                     "stop_update",
                     symbol=symbol,
                     new_stop=stop_price,
-                    reason="safety net: no stop found in post_market",
+                    reason=f"safety net ({stop_source}): no stop found in post_market",
                 )
+
+                # Update DB to reflect the stop we actually placed
+                if self._trade_db and db_pos:
+                    self._trade_db.update_stop(symbol, stop_price, stop_type="lod")
+                    self._trade_db.update_position(
+                        symbol,
+                        stop_order_id=str(getattr(new_order, "id", "")),
+                    )
+
             except Exception as exc:
                 logger.error(
                     "SAFETY NET: failed to ensure stop for %s: %s",
@@ -995,7 +1037,7 @@ class DailyWorkflow:
         try:
             # 1. Cancel all open orders for this symbol (bracket children)
             orders = self._alpaca_client.get_orders(symbols=[action.symbol])
-            cancelled_count = 0
+            cancelled_ids = []
             for order in orders:
                 try:
                     self._alpaca_client.cancel_order(str(order.id))
@@ -1003,14 +1045,35 @@ class DailyWorkflow:
                         "Cancelled %s order %s for %s (stop update)",
                         getattr(order, "type", "?"), order.id, action.symbol,
                     )
-                    cancelled_count += 1
+                    cancelled_ids.append(str(order.id))
                 except Exception as cancel_exc:
                     logger.warning(
                         "Could not cancel order %s: %s", order.id, cancel_exc,
                     )
 
-            if cancelled_count > 0:
-                time.sleep(1.0)  # let Alpaca process cancellations
+            # 1b. Poll until Alpaca confirms all cancellations are processed.
+            # Alpaca processes bracket-child cancellations asynchronously;
+            # a blind 1s sleep is unreliable.  Poll up to 5× with backoff.
+            if cancelled_ids:
+                from alpaca.trading.enums import OrderStatus as _OS
+                max_polls = 5
+                for poll in range(1, max_polls + 1):
+                    time.sleep(1.0 * poll)  # 1s, 2s, 3s, 4s, 5s
+                    still_open = self._alpaca_client.get_orders(
+                        symbols=[action.symbol],
+                    )
+                    if not still_open:
+                        logger.info(
+                            "All orders for %s confirmed cancelled (poll %d/%d)",
+                            action.symbol, poll, max_polls,
+                        )
+                        break
+                    if poll == max_polls:
+                        logger.warning(
+                            "%d order(s) still open for %s after %d polls — "
+                            "proceeding anyway",
+                            len(still_open), action.symbol, max_polls,
+                        )
 
             # 2. Get current position to determine qty for the new stop
             pos = self._alpaca_client.get_position(action.symbol)
@@ -1027,14 +1090,40 @@ class DailyWorkflow:
             # (SEC Rule 612) and SMA values are rolling means with fractional cents.
             rounded_stop = round(action.new_stop, 2)
 
-            # 3. Submit new standalone GTC stop order
-            new_order = self._alpaca_client.submit_stop_order(
-                symbol=action.symbol,
-                qty=qty,
-                side=OrderSide.SELL,
-                stop_price=rounded_stop,
-                # GTC is the default in submit_stop_order
-            )
+            # 3. Submit new standalone GTC stop order (with retry)
+            max_submit = 3
+            new_order = None
+            for attempt in range(1, max_submit + 1):
+                try:
+                    new_order = self._alpaca_client.submit_stop_order(
+                        symbol=action.symbol,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        stop_price=rounded_stop,
+                        # GTC is the default in submit_stop_order
+                    )
+                    break
+                except Exception as submit_exc:
+                    submit_msg = str(submit_exc).lower()
+                    is_retryable = any(
+                        kw in submit_msg
+                        for kw in ("exclusive", "insufficient", "cannot", "held", "locked")
+                    )
+                    if attempt < max_submit and is_retryable:
+                        wait = 2.0 * attempt
+                        logger.warning(
+                            "Stop submit attempt %d/%d for %s failed (%s) "
+                            "— retrying in %.0fs",
+                            attempt, max_submit, action.symbol,
+                            submit_exc, wait,
+                        )
+                        time.sleep(wait)
+                    else:
+                        raise  # re-raise to outer handler
+
+            if new_order is None:
+                logger.error("Stop submission returned None for %s", action.symbol)
+                return
 
             logger.info(
                 "STOP UPDATED: %s -> $%.2f (new GTC stop %s) — %s",
