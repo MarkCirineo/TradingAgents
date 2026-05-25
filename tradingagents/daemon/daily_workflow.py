@@ -77,6 +77,57 @@ class DailyWorkflow:
             from tradingagents.execution.trade_db import TradeDB
             self._trade_db = TradeDB()
 
+    # -- market calendar ----------------------------------------------------
+
+    def is_trading_day(self, target_date: date = None) -> bool:
+        """Check if the given date is a market trading day.
+
+        Uses Alpaca's trading calendar API, which accounts for all US
+        market holidays (Memorial Day, July 4th, Thanksgiving, etc.).
+
+        Fails open: if the API is unreachable we assume it IS a trading
+        day.  Missing a holiday is far less costly than missing a real
+        trading day.
+        """
+        self._ensure_components()
+        target = target_date or date.today()
+        try:
+            cal = self._alpaca_client.get_calendar(
+                start=target.isoformat(),
+                end=target.isoformat(),
+            )
+            if not cal:
+                logger.warning(
+                    "Empty calendar response for %s — assuming NOT a trading day",
+                    target,
+                )
+                return False
+            # Alpaca returns calendar entries only for trading days.
+            # If the returned date matches our target, it's a trading day.
+            cal_date = getattr(cal[0], "date", None)
+            if cal_date:
+                cal_date_str = (
+                    cal_date.isoformat()
+                    if hasattr(cal_date, "isoformat")
+                    else str(cal_date)
+                )
+                is_trading = cal_date_str == target.isoformat()
+                if not is_trading:
+                    logger.info(
+                        "Calendar check: %s is NOT a trading day "
+                        "(nearest trading day: %s)",
+                        target, cal_date_str,
+                    )
+                return is_trading
+            return True  # fail-open: ambiguous response
+        except Exception as exc:
+            logger.warning(
+                "Calendar check failed for %s: %s — assuming trading day "
+                "(fail-open)",
+                target, exc,
+            )
+            return True  # fail-open
+
     # -- 8:00 AM: Pre-market ------------------------------------------------
 
     def pre_market(self) -> DayContext:
@@ -85,9 +136,28 @@ class DailyWorkflow:
         This creates the ``DayContext`` for the day. If the regime is
         unfavorable, ``candidates`` will be empty and no entries will
         be attempted.
+
+        If today is a market holiday, returns an empty context
+        immediately — all downstream steps (analyze, execute_entries,
+        etc.) will see no candidates and no-op.
         """
         self._ensure_components()
         self._ctx = DayContext(date=date.today().isoformat())
+
+        # Market holiday check — skip everything if market is closed today
+        if not self.is_trading_day():
+            logger.info(
+                "=== MARKET HOLIDAY %s — skipping all trading ===",
+                self._ctx.date,
+            )
+            notify(
+                "info",
+                message=(
+                    f"Market holiday {self._ctx.date} — no trading today. "
+                    f"All scheduled jobs will be skipped."
+                ),
+            )
+            return self._ctx
 
         logger.info("=== PRE-MARKET %s ===", self._ctx.date)
 
@@ -249,6 +319,15 @@ class DailyWorkflow:
         if self._ctx is None:
             logger.error("execute_entries called before pre_market")
             return DayContext()
+
+        # Second-line-of-defense: confirm market is open before placing orders.
+        # pre_market() already checks, but this guards against manual --once
+        # invocations or scheduler edge cases where pre_market was skipped.
+        if not self.is_trading_day():
+            logger.warning(
+                "execute_entries called on non-trading day — aborting"
+            )
+            return self._ctx
 
         if not self._ctx.regime_favorable:
             logger.info("Skipping entries — regime unfavorable")

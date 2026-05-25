@@ -66,8 +66,9 @@ class TradingDaemon:
 
         for job_id, time_str, func in jobs:
             hour, minute = time_str.split(":")
+            wrapped = self._make_market_day_wrapper(func)
             self._scheduler.add_job(
-                func,
+                wrapped,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
                     hour=int(hour),
@@ -79,6 +80,26 @@ class TradingDaemon:
                 misfire_grace_time=300,  # 5 min grace period
             )
             logger.info("Scheduled: %s at %s ET (Mon-Fri)", job_id, time_str)
+
+    def _make_market_day_wrapper(self, func):
+        """Wrap a workflow function to skip execution on non-trading days.
+
+        Uses the workflow's ``is_trading_day()`` method which queries
+        Alpaca's trading calendar.  Fails open (runs the job) if the
+        calendar API is unreachable.
+        """
+        from functools import wraps
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not self._workflow.is_trading_day():
+                logger.info(
+                    "Skipping %s — not a trading day", func.__name__
+                )
+                return None
+            return func(*args, **kwargs)
+
+        return wrapper
 
     def start(self):
         """Start the daemon (blocking). Runs until Ctrl+C."""
