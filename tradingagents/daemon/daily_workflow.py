@@ -38,6 +38,7 @@ class DayContext:
     candidates: List[str] = field(default_factory=list)
     pipeline_decisions: Dict[str, str] = field(default_factory=dict)
     pivot_levels: Dict[str, dict] = field(default_factory=dict)
+    quality_scores: Dict[str, float] = field(default_factory=dict)
     entries_submitted: List[Dict[str, Any]] = field(default_factory=list)
     exits_executed: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -203,6 +204,10 @@ class DailyWorkflow:
 
         self._ctx.candidates = [r.symbol for r in filtered]
 
+        # Preserve quality scores for ranking in analyze() and execute_entries()
+        for r in filtered:
+            self._ctx.quality_scores[r.symbol] = r.score
+
         # Extract pivot levels from filter results for use at entry time
         for r in filtered:
             ph = r.checks.get("pivot_high")
@@ -220,12 +225,18 @@ class DailyWorkflow:
             len(filtered),
             self._ctx.candidates,
         )
-        if self._ctx.pivot_levels:
-            for sym, piv in self._ctx.pivot_levels.items():
-                logger.info(
-                    "  %s: pivot=$%.2f, floor=$%.2f (%d tight days)",
-                    sym, piv["pivot_high"], piv["pivot_low"], piv["tight_days"],
-                )
+        if self._ctx.quality_scores:
+            for sym in self._ctx.candidates:
+                qs = self._ctx.quality_scores.get(sym, 0)
+                piv = self._ctx.pivot_levels.get(sym)
+                if piv:
+                    logger.info(
+                        "  %s: quality=%.1f, pivot=$%.2f, floor=$%.2f (%d tight days)",
+                        sym, qs, piv["pivot_high"], piv["pivot_low"],
+                        piv["tight_days"],
+                    )
+                else:
+                    logger.info("  %s: quality=%.1f (no pivot)", sym, qs)
 
         # Log to trade DB
         try:
@@ -264,7 +275,13 @@ class DailyWorkflow:
 
         self._ensure_components()
 
-        candidates = self._ctx.candidates
+        # Sort candidates by quality score (best first) so the LLM pipeline
+        # spends its budget (max_pipeline_runs) on the highest-quality setups.
+        candidates = sorted(
+            self._ctx.candidates,
+            key=lambda s: self._ctx.quality_scores.get(s, 0),
+            reverse=True,
+        )
         pipeline_mode = self._config.get("pipeline_mode", "full")
 
         logger.info(
@@ -348,13 +365,24 @@ class DailyWorkflow:
             regime=self._ctx.regime,
         )
 
-        buy_symbols = [
-            s for s, d in self._ctx.pipeline_decisions.items() if d == "buy"
-        ]
+        # Sort buy candidates by quality score (best first) so the
+        # highest-quality setups get first dibs on limited position slots.
+        # Guardrails will naturally block excess entries once limits are hit.
+        buy_symbols = sorted(
+            [s for s, d in self._ctx.pipeline_decisions.items() if d == "buy"],
+            key=lambda s: self._ctx.quality_scores.get(s, 0),
+            reverse=True,
+        )
         logger.info(
-            "Execute entries: %d BUY decisions to execute via pivot breakout",
+            "Execute entries: %d BUY decisions to execute via pivot breakout "
+            "(quality-ranked)",
             len(buy_symbols),
         )
+        for symbol in buy_symbols:
+            logger.info(
+                "  %s: quality=%.1f",
+                symbol, self._ctx.quality_scores.get(symbol, 0),
+            )
 
         for symbol in buy_symbols:
             try:

@@ -103,13 +103,94 @@ class PreFilter:
         )
         return results
 
+    # -- quality ranking -----------------------------------------------------
+
+    @staticmethod
+    def compute_quality_score(checks: dict) -> float:
+        """Compute a continuous 0-100 quality score from pre-filter check data.
+
+        Uses 6 dimensions weighted by importance per the strategy doc:
+          - Relative Strength   (30%)  "You need to be in the best stocks"
+          - Consolidation Tight (25%)  "Tighter the better"
+          - Prior Uptrend       (20%)  "Bigger first leg, bigger second leg"
+          - ADR%                (10%)  "High ADR is equal to gold"
+          - Pivot Proximity     (10%)  "Do not chase"
+          - Dollar Volume        (5%)  Liquidity floor
+
+        Each dimension is normalized to 0.0-1.0 via min-max scaling
+        against sensible bounds, then weighted and summed to 0-100.
+
+        This score does NOT affect pass/fail — it only determines the
+        processing order so the best setups get first dibs on limited
+        position slots.
+        """
+
+        def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+            return max(lo, min(hi, value))
+
+        # --- 1. Relative Strength (30%) ---
+        # 5% outperformance = 0.0 (bare minimum to pass), 30%+ = 1.0
+        rs_val = checks.get("relative_strength_value", 0.05)
+        rs_score = _clamp((rs_val - 0.05) / (0.30 - 0.05))
+
+        # --- 2. Consolidation Tightness (25%) ---
+        # Combines volume contraction ratio (lower = better, 60% weight)
+        # and tight days count (more = better, 40% weight)
+        vol_ratio = checks.get("vol_ratio", 1.0)
+        vol_component = _clamp((1.0 - vol_ratio) / (1.0 - 0.40))
+        tight_days = checks.get("tight_days", 2)
+        days_component = _clamp((tight_days - 2) / (7 - 2))
+        tightness_score = 0.6 * vol_component + 0.4 * days_component
+
+        # --- 3. Prior Uptrend Strength (20%) ---
+        # 30% gain = 0.0 (bare minimum), 100%+ = 1.0
+        uptrend_val = checks.get("prior_uptrend_value", 0.30)
+        uptrend_score = _clamp((uptrend_val - 0.30) / (1.00 - 0.30))
+
+        # --- 4. ADR% (10%) ---
+        # 4% = 0.0 (bare minimum), 12%+ = 1.0
+        adr_val = checks.get("adr_pct_value", 0.04)
+        adr_score = _clamp((adr_val - 0.04) / (0.12 - 0.04))
+
+        # --- 5. Pivot Proximity (10%) ---
+        # Below or at pivot = 1.0 (best: buy-stop territory)
+        # Above pivot, decays linearly to 0.0 at 1R of extension
+        price = checks.get("price", 0)
+        pivot_high = checks.get("pivot_high", 0)
+        pivot_low = checks.get("pivot_low", 0)
+        risk_per_share = pivot_high - pivot_low if pivot_high and pivot_low else 0
+        if price <= 0 or pivot_high <= 0 or risk_per_share <= 0:
+            proximity_score = 0.5  # neutral fallback if data missing
+        elif price <= pivot_high:
+            proximity_score = 1.0  # still in consolidation — ideal
+        else:
+            proximity_score = _clamp(
+                1.0 - (price - pivot_high) / risk_per_share
+            )
+
+        # --- 6. Dollar Volume (5%) ---
+        # $50M = 0.0 (bare minimum), $500M+ = 1.0
+        dvol = checks.get("dollar_volume_value", 50_000_000)
+        dvol_score = _clamp((dvol - 50_000_000) / (500_000_000 - 50_000_000))
+
+        # --- Weighted composite ---
+        quality = (
+            rs_score * 0.30
+            + tightness_score * 0.25
+            + uptrend_score * 0.20
+            + adr_score * 0.10
+            + proximity_score * 0.10
+            + dvol_score * 0.05
+        ) * 100
+
+        return round(quality, 1)
+
     # -- individual checks --------------------------------------------------
 
     def _evaluate(self, symbol: str) -> FilterResult:
         """Run all checks on a single symbol."""
         checks = {}
         reject_reasons = []
-        score = 0.0
 
         # 1. Already held?
         if self._trade_db:
@@ -127,9 +208,7 @@ class PreFilter:
             dollar_vol = self.data_client.get_dollar_volume(symbol, period=20)
             checks["dollar_volume"] = dollar_vol >= self._params["min_dollar_volume"]
             checks["dollar_volume_value"] = dollar_vol
-            if checks["dollar_volume"]:
-                score += 1.0
-            else:
+            if not checks["dollar_volume"]:
                 reject_reasons.append(
                     f"dollar volume ${dollar_vol:,.0f} < ${self._params['min_dollar_volume']:,.0f}"
                 )
@@ -143,9 +222,7 @@ class PreFilter:
             adr_pct = self.data_client.compute_adr_pct(symbol, period=14)
             checks["adr_pct"] = adr_pct >= self._params["min_adr_pct"]
             checks["adr_pct_value"] = round(adr_pct, 4)
-            if checks["adr_pct"]:
-                score += 1.0
-            else:
+            if not checks["adr_pct"]:
                 reject_reasons.append(
                     f"ADR {adr_pct:.2%} < {self._params['min_adr_pct']:.0%}"
                 )
@@ -165,9 +242,7 @@ class PreFilter:
                 in_range = self._params["min_price"] <= latest_close <= self._params["max_price"]
                 checks["price_range"] = in_range
                 checks["price"] = latest_close
-                if in_range:
-                    score += 0.5
-                else:
+                if not in_range:
                     reject_reasons.append(
                         f"price ${latest_close:.2f} outside ${self._params['min_price']}-${self._params['max_price']}"
                     )
@@ -185,9 +260,7 @@ class PreFilter:
             min_rs = self._params.get("min_rs_outperformance", 0.05)
             checks["relative_strength"] = rs >= min_rs  # must outperform by >= 5%
             checks["relative_strength_value"] = round(rs, 4)
-            if checks["relative_strength"]:
-                score += 1.5  # High weight -- this is key for the strategy
-            else:
+            if not checks["relative_strength"]:
                 reject_reasons.append(
                     f"RS {rs:.2%} < required {min_rs:.0%} above SPY"
                 )
@@ -209,8 +282,7 @@ class PreFilter:
                 contracting = recent_5d < avg_20d
                 checks["volume_contraction"] = contracting
                 checks["vol_ratio"] = round(recent_5d / avg_20d, 3) if avg_20d > 0 else 0
-                if contracting:
-                    score += 0.5  # Bonus for consolidation pattern
+                # vol_ratio stored for quality scoring (lower = better)
             else:
                 checks["volume_contraction"] = False
         except Exception as exc:
@@ -235,9 +307,7 @@ class PreFilter:
                     min_uptrend = self._params.get("min_prior_uptrend_pct", 0.30)
                     checks["prior_uptrend"] = uptrend_pct >= min_uptrend
                     checks["prior_uptrend_value"] = round(uptrend_pct, 4)
-                    if checks["prior_uptrend"]:
-                        score += 1.0
-                    else:
+                    if not checks["prior_uptrend"]:
                         reject_reasons.append(
                             f"prior uptrend {uptrend_pct:.1%} < required {min_uptrend:.0%}"
                         )
@@ -264,9 +334,7 @@ class PreFilter:
                 stacked = s10 > s20 > s50
                 checks["ma_stacking"] = stacked
                 checks["ma_values"] = {"sma_10": round(s10, 2), "sma_20": round(s20, 2), "sma_50": round(s50, 2)}
-                if stacked:
-                    score += 1.0
-                else:
+                if not stacked:
                     reject_reasons.append(
                         f"MAs not stacked: 10={s10:.2f}, 20={s20:.2f}, 50={s50:.2f}"
                     )
@@ -290,7 +358,7 @@ class PreFilter:
                 checks["pivot_high"] = pivot["pivot_high"]
                 checks["pivot_low"] = pivot["pivot_low"]
                 checks["tight_days"] = pivot["tight_days"]
-                score += 1.0
+                # pivot data stored for quality scoring
             else:
                 checks["tight_consolidation"] = False
                 reject_reasons.append(
@@ -316,10 +384,15 @@ class PreFilter:
         ]
         passed = all(required_checks)
 
+        # Compute continuous quality score (0-100) for ranking.
+        # Only meaningful for passing candidates, but we compute it
+        # unconditionally so the data is available for logging/debugging.
+        quality_score = self.compute_quality_score(checks)
+
         return FilterResult(
             symbol=symbol,
             passed=passed,
-            score=round(score, 3),
+            score=quality_score,
             checks=checks,
             reject_reason="; ".join(reject_reasons) if reject_reasons else "",
         )
