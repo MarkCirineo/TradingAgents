@@ -351,7 +351,7 @@ const DashboardPage = {
                 Components.pnl(pos.unrealized_pl, 'money'),
                 pos.current_qty.toString(),
                 `D${pos.day_count}`,
-                pos.stop_price ? Components.formatMoney(pos.stop_price) : '\u2014',
+                this._formatStopCell(pos),
                 pos.take_profit_price ? Components.formatMoney(pos.take_profit_price) : '\u2014',
                 statusContainer,
             ];
@@ -365,6 +365,42 @@ const DashboardPage = {
         });
 
         container.appendChild(table);
+    },
+
+    /**
+     * Format the Stop column with price + type badge.
+     * Shows: "$142.50 [BE]" or "$156.30 [10SMA]" or "$138.00 [ORL]"
+     */
+    _formatStopCell(pos) {
+        const container = document.createElement('span');
+        container.style.whiteSpace = 'nowrap';
+        const price = pos.stop_price || pos.entry_orl;
+
+        if (!price) {
+            container.textContent = '\u2014';
+            return container;
+        }
+
+        // Determine stop type from DB flags
+        let typeLabel = 'ORL';
+        let badgeVariant = 'neutral';
+        if (pos.trailing_stop_active) {
+            typeLabel = '10SMA';
+            badgeVariant = 'info';
+        } else if (pos.breakeven_stop_active) {
+            typeLabel = 'BE';
+            badgeVariant = 'primary';
+        } else if (pos.entry_lod && Math.abs(price - pos.entry_lod) < 0.01) {
+            typeLabel = 'LOD';
+            badgeVariant = 'warning';
+        }
+
+        const priceSpan = document.createElement('span');
+        priceSpan.textContent = Components.formatMoney(price) + ' ';
+        container.appendChild(priceSpan);
+        container.appendChild(Components.badge(typeLabel, badgeVariant));
+
+        return container;
     },
 
     _updateActivity(data) {

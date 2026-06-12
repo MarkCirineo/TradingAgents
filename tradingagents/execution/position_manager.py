@@ -91,7 +91,15 @@ class PositionManager:
         for pos in positions:
             action = self._evaluate_position(pos)
             actions.append(action)
-            if action.action != "hold":
+            if action.action == "hold":
+                logger.debug(
+                    "PositionManager: %s -> HOLD (day=%d, trimmed=%s, stop=$%.2f)",
+                    action.symbol,
+                    pos.get("day_count", 0),
+                    bool(pos.get("trimmed", 0)),
+                    pos.get("entry_orl", 0),
+                )
+            else:
                 logger.info(
                     "PositionManager: %s -> %s (%s)",
                     action.symbol, action.action, action.reason,

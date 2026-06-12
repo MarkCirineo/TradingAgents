@@ -130,9 +130,21 @@ class Guardrails:
             checks["already_held"] = False
 
             # 2. Max concurrent positions
-            current_count = len(open_positions)
+            # Trimmed positions have near-zero risk (stop at/above breakeven)
+            # so they shouldn't block new entries.  The dollar-exposure check
+            # (3b) already accounts for their reduced market value.
+            untrimmed = [p for p in open_positions if not p.get("trimmed", 0)]
+            current_count = len(untrimmed)
+            trimmed_count = len(open_positions) - current_count
             checks["positions_count"] = current_count
+            checks["trimmed_positions"] = trimmed_count
             checks["positions_limit"] = self._max_concurrent
+            if trimmed_count:
+                logger.debug(
+                    "Guardrail: %d trimmed position(s) excluded from count "
+                    "(%d untrimmed / %d max)",
+                    trimmed_count, current_count, self._max_concurrent,
+                )
             if current_count >= self._max_concurrent:
                 return GuardrailResult(
                     approved=False,
