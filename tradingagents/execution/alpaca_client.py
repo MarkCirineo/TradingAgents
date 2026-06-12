@@ -24,6 +24,7 @@ from alpaca.trading.enums import (
 )
 from alpaca.trading.requests import (
     ClosePositionRequest,
+    GetCalendarRequest,
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
@@ -161,7 +162,8 @@ class AlpacaClient:
 
     def get_calendar(self, start=None, end=None):
         """Return the trading calendar between *start* and *end*."""
-        return self._retry(self.client.get_calendar, start=start, end=end)
+        filters = GetCalendarRequest(start=start, end=end)
+        return self._retry(self.client.get_calendar, filters=filters)
 
     # -- positions ----------------------------------------------------------
 
