@@ -88,11 +88,27 @@ DEFAULT_CONFIG = {
     },
     # Ticker screening
     "screening": {
-        "source": os.getenv("SCREENING_SOURCE", "alpaca"),  # alpaca, hybrid, watchlist
+        # Source group: "alpaca" (most-actives + movers), "yfinance",
+        # "watchlist", or "hybrid" (all enabled sources merged).
+        "source": os.getenv("SCREENING_SOURCE", "hybrid"),
         "watchlist": [],                    # Manual ticker list
         "max_candidates": int(os.getenv("MAX_CANDIDATES", "35")),
         "max_pipeline_runs": int(os.getenv("MAX_PIPELINE_RUNS", "15")),
         "max_workers": int(os.getenv("MAX_WORKERS", "1")),
+        # Alpaca sub-sources (used when source is "alpaca" or "hybrid")
+        "alpaca_most_actives": True,        # top-N by share volume
+        "alpaca_movers": True,              # top-N % gainers (momentum-aligned)
+        # Yahoo Finance whole-market criteria screener (no API key needed).
+        # Query criteria mirror the swing playbook's top-of-funnel rules;
+        # the pre-filter still enforces the strict versions afterwards.
+        "yfinance_screener": {
+            "enabled": True,
+            "max_results": int(os.getenv("YF_SCREENER_MAX_RESULTS", "100")),
+            "min_avg_volume_3m": 500_000,   # liquidity floor (shares/day)
+            "min_52wk_change_pct": 30.0,    # momentum floor (proxy for prior uptrend)
+            "exchanges": ["NMS", "NYQ", "NGM", "ASE"],  # Nasdaq GS/GM, NYSE, AMEX
+            "sort_field": "percentchange",  # surface fresh movers first
+        },
     },
     # Swing trading strategy parameters (distilled from expert document)
     "swing_strategy": {

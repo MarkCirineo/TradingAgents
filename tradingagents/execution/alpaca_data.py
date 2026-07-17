@@ -24,12 +24,36 @@ from alpaca.data.timeframe import TimeFrame
 logger = logging.getLogger(__name__)
 
 
+def _resolve_feed(env_var: str, default: str) -> DataFeed:
+    """Resolve a market-data feed name from an environment variable."""
+    raw = os.environ.get(env_var, default).strip().lower()
+    try:
+        return DataFeed(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r -- falling back to %s", env_var, raw, default
+        )
+        return DataFeed(default)
+
+
 # ---------------------------------------------------------------------------
 # Data client wrapper
 # ---------------------------------------------------------------------------
 
 class AlpacaDataClient:
     """Wrapper around Alpaca's market-data and screener APIs.
+
+    Two feeds are used:
+
+    - **Daily/historical bars** (``get_bars`` and everything built on it)
+      default to the SIP feed (``ALPACA_DAILY_FEED``).  IEX bars only
+      contain IEX-exchange trades (~3-5% of consolidated volume), which
+      understates dollar volume ~20x and narrows high/low ranges (ADR).
+      The free plan allows SIP data delayed 15+ minutes, so daily-bar
+      requests are clamped to end 16 minutes in the past.
+    - **Real-time data** (``get_snapshots``, ``get_intraday_bars``)
+      defaults to IEX (``ALPACA_DATA_FEED``), which is free without
+      delay.  Set to ``sip`` with a market-data subscription.
 
     Parameters
     ----------
@@ -39,6 +63,9 @@ class AlpacaDataClient:
         Falls back to ``ALPACA_SECRET_KEY``.
     """
 
+    # Free-plan SIP data must trail real time by 15 minutes; use 16 for slack.
+    _SIP_DELAY_MINUTES = 16
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -46,6 +73,8 @@ class AlpacaDataClient:
     ):
         self._api_key = api_key or os.environ.get("ALPACA_API_KEY", "")
         self._secret_key = secret_key or os.environ.get("ALPACA_SECRET_KEY", "")
+        self._feed = _resolve_feed("ALPACA_DATA_FEED", "iex")
+        self._daily_feed = _resolve_feed("ALPACA_DAILY_FEED", "sip")
         self._stock_client: Optional[StockHistoricalDataClient] = None
         self._screener_client: Optional[ScreenerClient] = None
 
@@ -99,6 +128,37 @@ class AlpacaDataClient:
         logger.info("Screener returned %d most-active tickers", len(results))
         return results
 
+    def get_market_movers(self, top: int = 20) -> list[dict]:
+        """Return the top *top* gainers from Alpaca's market-movers screener.
+
+        Gainers align with the swing playbook's momentum bias far better
+        than most-actives-by-volume (which surfaces mega-caps and
+        sub-$5 volume churners).
+
+        Returns
+        -------
+        list[dict]
+            Each dict contains ``symbol``, ``price``, ``change``,
+            ``percent_change``, sorted by percent change descending.
+        """
+        from alpaca.data.requests import MarketMoversRequest
+
+        request = MarketMoversRequest(top=top)
+        response = self.screener_client.get_market_movers(request)
+
+        results = []
+        for item in response.gainers:
+            results.append(
+                {
+                    "symbol": item.symbol,
+                    "price": float(item.price),
+                    "change": float(item.change),
+                    "percent_change": float(item.percent_change),
+                }
+            )
+        logger.info("Screener returned %d market-mover gainers", len(results))
+        return results
+
     # -- snapshots ----------------------------------------------------------
 
     def get_snapshots(self, symbols: list[str]) -> dict:
@@ -111,7 +171,7 @@ class AlpacaDataClient:
             attributes ``latest_trade``, ``latest_quote``, ``minute_bar``,
             ``daily_bar``, ``previous_daily_bar``.
         """
-        request = StockSnapshotRequest(symbol_or_symbols=symbols, feed=DataFeed.IEX)
+        request = StockSnapshotRequest(symbol_or_symbols=symbols, feed=self._feed)
         return self.stock_client.get_stock_snapshot(request)
 
     # -- bars ---------------------------------------------------------------
@@ -153,14 +213,39 @@ class AlpacaDataClient:
         if end is None:
             end = datetime.now()
 
+        # Free-plan SIP access requires the window to end 15+ min in the past.
+        # Only affects the current day's partial bar -- harmless for daily data.
+        # Naive end times are interpreted as New York wall time below, so the
+        # clamp is computed on the NY clock (machine-local time may differ).
+        if self._daily_feed == DataFeed.SIP and end.tzinfo is None:
+            ny_now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
+            sip_safe_end = (
+                ny_now - timedelta(minutes=self._SIP_DELAY_MINUTES)
+            ).to_pydatetime()
+            end = min(end, sip_safe_end)
+
         request = StockBarsRequest(
             symbol_or_symbols=symbols,
             timeframe=timeframe,
             start=pd.Timestamp(start, tz="America/New_York"),
             end=pd.Timestamp(end, tz="America/New_York"),
-            feed=DataFeed.IEX,
+            feed=self._daily_feed,
         )
-        bars = self.stock_client.get_stock_bars(request)
+        try:
+            bars = self.stock_client.get_stock_bars(request)
+        except Exception as exc:
+            # Some accounts may not permit SIP at all -- degrade to IEX
+            # rather than breaking the whole pipeline.
+            if self._daily_feed == DataFeed.SIP and "subscription" in str(exc).lower():
+                logger.warning(
+                    "SIP historical data not permitted -- falling back to IEX "
+                    "(volume/ADR will be understated): %s", exc
+                )
+                self._daily_feed = DataFeed.IEX
+                request.feed = DataFeed.IEX
+                bars = self.stock_client.get_stock_bars(request)
+            else:
+                raise
         return bars.df
 
     def get_intraday_bars(
@@ -196,7 +281,7 @@ class AlpacaDataClient:
             timeframe=timeframe,
             start=pd.Timestamp(start, tz="America/New_York"),
             end=pd.Timestamp(end, tz="America/New_York"),
-            feed=DataFeed.IEX,
+            feed=self._feed,
         )
         bars = self.stock_client.get_stock_bars(request)
         df = bars.df
