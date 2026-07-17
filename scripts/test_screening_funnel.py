@@ -42,14 +42,18 @@ print(f"{len(candidates)} candidates (cap={DEFAULT_CONFIG['screening']['max_cand
 for c in candidates:
     print(f"  {c.symbol:<6} score={c.score:.2f}  [{c.source}]")
 
-print("\n=== Stage 3: Pre-filter (takes a few minutes) ===")
+print("\n=== Stage 3: Pre-filter (batched bars fetch) ===")
+import time
 pf = PreFilter(data_client=data_client)
 symbols = [c.symbol for c in candidates]
 
+t0 = time.time()
+results = pf.evaluate_all(symbols)
+elapsed = time.time() - t0
+
 gate_fails = Counter()
 passed = []
-for sym in symbols:
-    r = pf._evaluate(sym)
+for r in results:
     if r.passed:
         passed.append(r)
     else:
@@ -57,7 +61,8 @@ for sym in symbols:
             if ok is False:
                 gate_fails[gate] += 1
         if show_rejects:
-            print(f"  REJECT {sym:<6} {r.reject_reason}")
+            print(f"  REJECT {r.symbol:<6} {r.reject_reason}")
+print(f"(pre-filter took {elapsed:.1f}s)")
 
 passed.sort(key=lambda r: r.score, reverse=True)
 print(f"\nPASSED: {len(passed)}/{len(symbols)}")

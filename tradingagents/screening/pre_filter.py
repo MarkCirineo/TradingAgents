@@ -14,6 +14,11 @@ wisdom lives in code:
 - Volume contraction (consolidation signal)
 - Tight consolidation (>= 2 days with range <= 2/3 ADR; provides pivot levels)
 - Already-held filter (skip if we have an open position)
+
+All checks for a symbol compute off a single ~100-day daily-bar frame.
+``evaluate_all``/``filter_candidates`` fetch bars for every candidate
+(plus SPY) in one batched multi-symbol request -- a 35-symbol run costs
+a handful of API calls instead of ~9 per symbol.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+import pandas as pd
 
 from tradingagents.strategies.swing_playbook import get_screening_params
 
@@ -80,6 +87,12 @@ class PreFilter:
             self._data_client = AlpacaDataClient()
         return self._data_client
 
+    # How much history each symbol needs: 50-SMA and the 60-trading-day
+    # uptrend window both fit comfortably in ~100 calendar days of bars.
+    _LOOKBACK_DAYS = 100
+    # Symbols per multi-symbol bars request (stay well under URL limits).
+    _BATCH_CHUNK = 100
+
     # -- public API ---------------------------------------------------------
 
     def filter_candidates(self, symbols: List[str]) -> List[FilterResult]:
@@ -89,19 +102,106 @@ class PreFilter:
         descending.  Only passing candidates are included.
         """
         results = []
-        for symbol in symbols:
-            result = self._evaluate(symbol)
+        for result in self.evaluate_all(symbols):
             if result.passed:
                 results.append(result)
             else:
                 logger.info(
-                    "Pre-filter REJECTED %s: %s", symbol, result.reject_reason
+                    "Pre-filter REJECTED %s: %s", result.symbol, result.reject_reason
                 )
         results.sort(key=lambda r: r.score, reverse=True)
         logger.info(
             "Pre-filter: %d/%d candidates passed", len(results), len(symbols)
         )
         return results
+
+    def evaluate_all(self, symbols: List[str]) -> List[FilterResult]:
+        """Evaluate every symbol and return ALL results (passing or not).
+
+        Daily bars for all symbols plus SPY are fetched in one batched
+        request; each symbol's checks then run off its slice.
+        """
+        bars_map = self._fetch_bars_batch(symbols)
+        spy_bars = bars_map.get("SPY")
+        if spy_bars is None:
+            # Batch failed or SPY missing -- fetch once, not per symbol.
+            spy_bars = self._fetch_bars_single("SPY")
+        return [
+            self._evaluate(symbol, bars=bars_map.get(symbol), spy_bars=spy_bars)
+            for symbol in symbols
+        ]
+
+    # -- bar fetching --------------------------------------------------------
+
+    def _fetch_bars_batch(self, symbols: List[str]) -> Dict[str, pd.DataFrame]:
+        """Fetch ~100 days of daily bars for all *symbols* + SPY, batched.
+
+        Returns a mapping of ``symbol -> DataFrame``.  Symbols with no
+        data are simply absent from the result.
+        """
+        all_symbols = list(dict.fromkeys(list(symbols) + ["SPY"]))
+        frames: Dict[str, pd.DataFrame] = {}
+        for i in range(0, len(all_symbols), self._BATCH_CHUNK):
+            chunk = all_symbols[i : i + self._BATCH_CHUNK]
+            try:
+                df = self.data_client.get_bars(
+                    chunk, lookback_days=self._LOOKBACK_DAYS
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Batch bars fetch failed for %d symbols (%s) -- "
+                    "falling back to per-symbol fetches", len(chunk), exc,
+                )
+                continue
+            if df.empty:
+                continue
+            if isinstance(df.index, pd.MultiIndex):
+                for sym in df.index.get_level_values("symbol").unique():
+                    frames[sym] = df.xs(sym, level="symbol")
+            elif len(chunk) == 1:
+                frames[chunk[0]] = df
+        return frames
+
+    def _fetch_bars_single(self, symbol: str) -> pd.DataFrame:
+        """Fetch daily bars for one symbol (fallback path)."""
+        try:
+            df = self.data_client.get_bars(
+                symbol, lookback_days=self._LOOKBACK_DAYS
+            )
+        except Exception as exc:
+            logger.warning("Bars fetch failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        if isinstance(df.index, pd.MultiIndex):
+            try:
+                df = df.xs(symbol, level="symbol")
+            except KeyError:
+                return pd.DataFrame()
+        return df
+
+    @staticmethod
+    def _relative_strength(
+        bars: Optional[pd.DataFrame],
+        spy_bars: Optional[pd.DataFrame],
+        period: int = 20,
+    ) -> float:
+        """Return symbol_return - SPY_return over *period* trading days.
+
+        Returns 0.0 when either side has insufficient data (same
+        behavior as the old per-symbol fetch path).
+        """
+        if bars is None or spy_bars is None:
+            return 0.0
+        if len(bars) < period or len(spy_bars) < period:
+            return 0.0
+        returns = []
+        for df in (bars, spy_bars):
+            close = df["close"]
+            returns.append(
+                float((close.iloc[-1] - close.iloc[-period]) / close.iloc[-period])
+            )
+        return returns[0] - returns[1]
 
     # -- quality ranking -----------------------------------------------------
 
@@ -187,10 +287,31 @@ class PreFilter:
 
     # -- individual checks --------------------------------------------------
 
-    def _evaluate(self, symbol: str) -> FilterResult:
-        """Run all checks on a single symbol."""
+    def _evaluate(
+        self,
+        symbol: str,
+        bars: Optional[pd.DataFrame] = None,
+        spy_bars: Optional[pd.DataFrame] = None,
+    ) -> FilterResult:
+        """Run all checks on a single symbol off one daily-bar frame.
+
+        Parameters
+        ----------
+        bars : pd.DataFrame, optional
+            Pre-fetched ~100-day daily bars for *symbol*.  When omitted,
+            fetched individually -- prefer ``evaluate_all`` /
+            ``filter_candidates``, which batch-fetch for all symbols.
+        spy_bars : pd.DataFrame, optional
+            Pre-fetched SPY bars for the relative-strength check.
+        """
         checks = {}
         reject_reasons = []
+
+        if bars is None:
+            bars = self._fetch_bars_single(symbol)
+        if spy_bars is None:
+            spy_bars = self._fetch_bars_single("SPY")
+        has_bars = bars is not None and not bars.empty
 
         # 1. Already held?
         if self._trade_db:
@@ -203,9 +324,11 @@ class PreFilter:
         else:
             checks["already_held"] = True  # no DB = skip check
 
-        # 2. Dollar volume
+        # 2. Dollar volume (20-day average of close * volume)
         try:
-            dollar_vol = self.data_client.get_dollar_volume(symbol, period=20)
+            dollar_vol = 0.0
+            if has_bars:
+                dollar_vol = float((bars["close"] * bars["volume"]).tail(20).mean())
             checks["dollar_volume"] = dollar_vol >= self._params["min_dollar_volume"]
             checks["dollar_volume_value"] = dollar_vol
             if not checks["dollar_volume"]:
@@ -217,9 +340,12 @@ class PreFilter:
             checks["dollar_volume"] = False
             reject_reasons.append(f"dollar volume check error: {exc}")
 
-        # 3. ADR%
+        # 3. ADR% (14-day mean of (high - low) / close)
         try:
-            adr_pct = self.data_client.compute_adr_pct(symbol, period=14)
+            adr_pct = 0.0
+            if has_bars:
+                daily_range_pct = (bars["high"] - bars["low"]) / bars["close"]
+                adr_pct = float(daily_range_pct.tail(14).mean())
             checks["adr_pct"] = adr_pct >= self._params["min_adr_pct"]
             checks["adr_pct_value"] = round(adr_pct, 4)
             if not checks["adr_pct"]:
@@ -233,11 +359,7 @@ class PreFilter:
 
         # 4. Price range
         try:
-            bars = self.data_client.get_bars(symbol, lookback_days=5)
-            if not bars.empty:
-                import pandas as pd
-                if isinstance(bars.index, pd.MultiIndex):
-                    bars = bars.xs(symbol, level="symbol")
+            if has_bars:
                 latest_close = float(bars["close"].iloc[-1])
                 in_range = self._params["min_price"] <= latest_close <= self._params["max_price"]
                 checks["price_range"] = in_range
@@ -254,9 +376,9 @@ class PreFilter:
             checks["price_range"] = False
             reject_reasons.append(f"price check error: {exc}")
 
-        # 5. Relative strength vs SPY
+        # 5. Relative strength vs SPY (20-day return difference)
         try:
-            rs = self.data_client.compute_relative_strength(symbol, benchmark="SPY", period=20)
+            rs = self._relative_strength(bars, spy_bars, period=20)
             min_rs = self._params.get("min_rs_outperformance", 0.05)
             checks["relative_strength"] = rs >= min_rs  # must outperform by >= 5%
             checks["relative_strength_value"] = round(rs, 4)
@@ -271,12 +393,8 @@ class PreFilter:
 
         # 6. Volume contraction (consolidation signal)
         try:
-            bars_60d = self.data_client.get_bars(symbol, lookback_days=60)
-            if not bars_60d.empty:
-                import pandas as pd
-                if isinstance(bars_60d.index, pd.MultiIndex):
-                    bars_60d = bars_60d.xs(symbol, level="symbol")
-                vol = bars_60d["volume"]
+            if has_bars:
+                vol = bars["volume"]
                 recent_5d = vol.tail(5).mean()
                 avg_20d = vol.tail(20).mean()
                 contracting = recent_5d < avg_20d
@@ -291,13 +409,9 @@ class PreFilter:
 
         # 7. Prior uptrend check (doc: "30%+ move in recent weeks/months")
         try:
-            bars_uptrend = self.data_client.get_bars(symbol, lookback_days=90)
-            if not bars_uptrend.empty:
-                import pandas as pd
-                if isinstance(bars_uptrend.index, pd.MultiIndex):
-                    bars_uptrend = bars_uptrend.xs(symbol, level="symbol")
-                if len(bars_uptrend) >= 40:
-                    close = bars_uptrend["close"]
+            if has_bars:
+                if len(bars) >= 40:
+                    close = bars["close"]
                     # Find the max return from any point in the last 60 trading
                     # days to the current close — this captures the "pole" move.
                     current_close = float(close.iloc[-1])
@@ -324,13 +438,11 @@ class PreFilter:
 
         # 8. MA stacking (doc: "10 > 20 > 50 -- bullish stack")
         try:
-            sma_10 = self.data_client.compute_sma(symbol, period=10, lookback_days=100)
-            sma_20 = self.data_client.compute_sma(symbol, period=20, lookback_days=100)
-            sma_50 = self.data_client.compute_sma(symbol, period=50, lookback_days=100)
-            if not sma_10.empty and not sma_20.empty and not sma_50.empty:
-                s10 = float(sma_10.iloc[-1])
-                s20 = float(sma_20.iloc[-1])
-                s50 = float(sma_50.iloc[-1])
+            if has_bars:
+                close = bars["close"]
+                s10 = float(close.rolling(window=10).mean().iloc[-1])
+                s20 = float(close.rolling(window=20).mean().iloc[-1])
+                s50 = float(close.rolling(window=50).mean().iloc[-1])
                 stacked = s10 > s20 > s50
                 checks["ma_stacking"] = stacked
                 checks["ma_values"] = {"sma_10": round(s10, 2), "sma_20": round(s20, 2), "sma_50": round(s50, 2)}
@@ -347,12 +459,13 @@ class PreFilter:
             reject_reasons.append(f"MA stacking error: {exc}")
 
         # 9. Tight consolidation (doc: "Daily Range <= 2/3 * ADR", min 2 days)
-        #    Uses bars_60d already fetched in check #6 — zero extra API calls.
         #    Provides pivot_high (entry trigger) and pivot_low (stop level).
         try:
-            pivot = self.data_client.compute_consolidation_pivot(
-                symbol, bars=bars_60d, min_tight_days=2,
-            )
+            pivot = None
+            if has_bars:
+                pivot = self.data_client.compute_consolidation_pivot(
+                    symbol, bars=bars, min_tight_days=2,
+                )
             if pivot:
                 checks["tight_consolidation"] = True
                 checks["pivot_high"] = pivot["pivot_high"]
