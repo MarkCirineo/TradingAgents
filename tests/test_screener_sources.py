@@ -15,6 +15,7 @@ import pytest
 
 from tradingagents.screening.screener import (
     AlpacaMoversScreener,
+    AlpacaScreener,
     HybridScreener,
     ScreenerCandidate,
     YFinanceScreener,
@@ -162,6 +163,31 @@ class TestYFinanceScreener:
         assert "10.0" in flat and "200.0" in flat
         assert "avgdailyvol3m" in flat
         assert "fiftytwowkpercentchange" in flat
+
+
+# ---------------------------------------------------------------------------
+# AlpacaScreener (most actives)
+# ---------------------------------------------------------------------------
+
+class TestAlpacaScreener:
+    def test_clamps_top_to_api_max(self):
+        """Alpaca rejects top > 100 — a large max_candidates must not
+        error out the whole source (it would silently return [])."""
+        requested = {}
+
+        def fake_most_active(top, by="volume"):
+            requested["top"] = top
+            return [{"symbol": "AAA", "volume": 1_000_000, "trade_count": 5000}]
+
+        screener = AlpacaScreener(
+            data_client=SimpleNamespace(get_most_active=fake_most_active)
+        )
+        result = screener.scan(top=300)
+
+        assert requested["top"] == 100
+        assert len(result) == 1
+        # Rank score normalised by the clamped count
+        assert result[0].score == 1.0
 
 
 # ---------------------------------------------------------------------------

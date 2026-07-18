@@ -62,11 +62,18 @@ class AlpacaScreener:
             self._data_client = AlpacaDataClient()
         return self._data_client
 
+    # Alpaca caps the most-actives endpoint at 100 results — larger
+    # requests are rejected outright ("invalid top").
+    _API_MAX = 100
+
     def scan(self, top: int = 20) -> List[ScreenerCandidate]:
         """Return the top *top* most-active tickers by volume.
 
         Each candidate gets a normalised score based on its volume rank.
+        *top* is clamped to the API maximum so a large ``max_candidates``
+        doesn't error out this source entirely.
         """
+        top = min(top, self._API_MAX)
         try:
             raw = self.data_client.get_most_active(top=top, by="volume")
         except Exception as exc:
