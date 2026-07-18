@@ -61,6 +61,13 @@ const API = {
         return this._fetch('/api/clock');
     },
 
+    // ── Market Regime ─────────────────────────────────────────
+
+    /** Get the market regime (SPY MA stacking + VIX, cached ~10 min). */
+    async getRegime() {
+        return this._fetch('/api/regime');
+    },
+
     // ── Orders ────────────────────────────────────────────────
 
     /** Get orders with optional filters. */

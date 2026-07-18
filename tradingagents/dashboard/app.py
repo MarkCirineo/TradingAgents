@@ -110,6 +110,7 @@ from tradingagents.dashboard.api.alpaca_orders import router as alpaca_orders_ro
 from tradingagents.dashboard.api.comparison import router as comparison_router
 from tradingagents.dashboard.api.config import router as config_router
 from tradingagents.dashboard.api.logs import router as logs_router
+from tradingagents.dashboard.api.regime import router as regime_router
 
 app.include_router(portfolio_router, prefix="/api", tags=["portfolio"])
 app.include_router(stream_router, prefix="/api", tags=["stream"])
@@ -120,6 +121,7 @@ app.include_router(alpaca_orders_router, prefix="/api", tags=["alpaca-orders"])
 app.include_router(comparison_router, prefix="/api", tags=["comparison"])
 app.include_router(config_router, prefix="/api", tags=["config"])
 app.include_router(logs_router, prefix="/api", tags=["logs"])
+app.include_router(regime_router, prefix="/api", tags=["regime"])
 
 # ---------------------------------------------------------------------------
 # Static files — serve the SPA
@@ -131,10 +133,17 @@ _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
+# The SPA shell must always revalidate — without Cache-Control, browsers
+# apply heuristic caching and serve a stale index.html (with stale script
+# references) for days.  Static assets carry ?v= cache-busting params, so
+# a fresh shell is all that's needed to pick up new JS/CSS.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 async def serve_spa():
     """Serve the main SPA shell for all non-API routes."""
-    return FileResponse(str(_STATIC_DIR / "index.html"))
+    return FileResponse(str(_STATIC_DIR / "index.html"), headers=_NO_CACHE)
 
 
 # Catch-all for SPA client-side routing (non-API, non-static paths)
@@ -146,7 +155,7 @@ async def spa_fallback(path: str):
         raise HTTPException(404, "Not found")
     index_path = _STATIC_DIR / "index.html"
     if index_path.exists():
-        return FileResponse(str(index_path))
+        return FileResponse(str(index_path), headers=_NO_CACHE)
 
 
 # ---------------------------------------------------------------------------

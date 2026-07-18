@@ -64,11 +64,12 @@ const DashboardPage = {
      * Refresh all dashboard data.
      */
     async refresh() {
-        const [portfolio, positionsData, equityData, screeningData] = await Promise.all([
+        const [portfolio, positionsData, equityData, screeningData, regime] = await Promise.all([
             API.getPortfolio(),
             API.getPositions(),
             API.getEquityCurve(this._chartDays),
             API.getScreeningLatest(),
+            API.getRegime(),
         ]);
 
         if (portfolio) this._updatePortfolioCards(portfolio);
@@ -78,6 +79,7 @@ const DashboardPage = {
             this._updateActivity(screeningData);
             this._updateScreeningLog(screeningData.screening || []);
         }
+        if (regime) this._updateRegimeCard(regime);
     },
 
     /**
@@ -161,15 +163,93 @@ const DashboardPage = {
         regime.appendChild(regimeInfo);
         regimeContent.appendChild(regime);
 
+        // Regime detail rows (SPY MAs, VIX, risk knobs) \u2014 filled on refresh
+        const regimeParams = document.createElement('div');
+        regimeParams.id = 'regime-params';
+        regimeParams.style.marginTop = '12px';
+        regimeContent.appendChild(regimeParams);
+
         // Positions count
         const posCount = document.createElement('div');
         posCount.className = 'stat-row';
-        posCount.style.marginTop = '16px';
+        posCount.style.marginTop = '4px';
         posCount.innerHTML = '<span class="stat-row__label">Open Positions</span><span class="stat-row__value" id="positions-count">\u2014</span>';
         regimeContent.appendChild(posCount);
 
         regimeCard.appendChild(regimeContent);
         grid.appendChild(regimeCard);
+    },
+
+    /**
+     * Update the Market Regime card with live data from /api/regime.
+     * Shows the bot's actual go/no-go signal: SPY MA stacking + VIX.
+     */
+    _updateRegimeCard(data) {
+        const checks = data.checks || {};
+        const regime = data.regime || {};
+        const label = regime.label || 'Unknown';
+        const favorable = data.favorable;
+
+        // Dot colour: green when trading, orange when cautious, red when off
+        const dot = document.getElementById('regime-dot');
+        if (dot) {
+            let dotClass = 'regime__dot--normal';
+            if (favorable === false || regime.pause_entries) {
+                dotClass = 'regime__dot--panic';
+            } else if (label === 'Elevated') {
+                dotClass = 'regime__dot--elevated';
+            }
+            dot.className = `regime__dot ${dotClass}`;
+        }
+
+        // Label: the go/no-go verdict
+        const labelEl = document.getElementById('regime-label');
+        if (labelEl) {
+            if (favorable === null || favorable === undefined) {
+                labelEl.textContent = 'Unavailable';
+            } else {
+                labelEl.textContent = favorable
+                    ? `Favorable \u2014 ${label}`
+                    : `No Entries \u2014 ${label}`;
+            }
+            labelEl.className = 'regime__label ' +
+                (favorable ? 'text-success' : favorable === false ? 'text-danger' : '');
+        }
+
+        // Detail line: the two SPY gates + VIX
+        const detailEl = document.getElementById('regime-detail');
+        if (detailEl) {
+            if (checks.spy_close) {
+                const above = checks.spy_above_20ma ? '\u2713' : '\u2717';
+                const stacked = checks.spy_10_above_20 ? '\u2713' : '\u2717';
+                const vix = checks.vix_level ? checks.vix_level.toFixed(1) : '\u2014';
+                detailEl.textContent =
+                    `SPY > 20MA ${above} \u00b7 10MA > 20MA ${stacked} \u00b7 VIX ${vix}`;
+            } else {
+                detailEl.textContent = 'Regime data unavailable';
+            }
+        }
+
+        // Risk knobs the regime sets for today
+        const params = document.getElementById('regime-params');
+        if (params) {
+            params.innerHTML = '';
+            if (regime.label) {
+                const rows = [
+                    ['Risk per trade', `${((regime.risk_pct || 0) * 100).toFixed(2)}%`],
+                    ['Max positions', `${regime.max_positions ?? '\u2014'}`],
+                    ['Max exposure', `${((regime.max_exposure_pct || 0) * 100).toFixed(0)}%`],
+                ];
+                rows.forEach(([l, v]) => {
+                    const row = document.createElement('div');
+                    row.className = 'stat-row';
+                    row.innerHTML =
+                        `<span class="stat-row__label">${l}</span>` +
+                        `<span class="stat-row__value">${v}</span>`;
+                    params.appendChild(row);
+                });
+            }
+        }
     },
 
     _updatePortfolioCards(data) {
@@ -327,10 +407,15 @@ const DashboardPage = {
             return;
         }
 
-        const headers = ['Symbol', 'Entry', 'Current', 'P&L', 'Shares', 'Day', 'Stop', 'TP', 'Status'];
+        const headers = ['Symbol', 'Entry', 'Current', 'P&L', 'Shares', 'Day', 'Stop', 'Status'];
         const rows = positions.map(pos => {
+            const isPending = pos.status === 'PENDING';
+
             // Build status badges
             const statusContainer = document.createElement('span');
+            if (isPending) {
+                statusContainer.appendChild(Components.badge('Pending Fill', 'warning'));
+            }
             if (pos.trimmed) {
                 statusContainer.appendChild(Components.badge('Trimmed', 'warning'));
             }
@@ -340,19 +425,18 @@ const DashboardPage = {
             if (pos.breakeven_stop_active) {
                 statusContainer.appendChild(Components.badge('BE Stop', 'primary'));
             }
-            if (!pos.trimmed && !pos.trailing_stop_active && !pos.breakeven_stop_active) {
-                statusContainer.appendChild(Components.badge(pos.pipeline_mode === 'full' ? 'LLM' : 'Quant', 'neutral'));
-            }
+            statusContainer.appendChild(
+                Components.badge(pos.pipeline_mode === 'full' ? 'LLM' : 'Quant', 'neutral')
+            );
 
             return [
                 pos.symbol,
                 Components.formatMoney(pos.entry_price),
-                Components.formatMoney(pos.current_price),
-                Components.pnl(pos.unrealized_pl, 'money'),
-                pos.current_qty.toString(),
-                `D${pos.day_count}`,
+                isPending ? '\u2014' : Components.formatMoney(pos.current_price),
+                isPending ? '\u2014' : Components.pnl(pos.unrealized_pl, 'money'),
+                (pos.current_qty || 0).toString(),
+                isPending ? '\u2014' : `D${pos.day_count}`,
                 this._formatStopCell(pos),
-                pos.take_profit_price ? Components.formatMoney(pos.take_profit_price) : '\u2014',
                 statusContainer,
             ];
         });
@@ -369,12 +453,14 @@ const DashboardPage = {
 
     /**
      * Format the Stop column with price + type badge.
-     * Shows: "$142.50 [BE]" or "$156.30 [10SMA]" or "$138.00 [ORL]"
+     * Shows: "$142.50 [BE]" or "$156.30 [10SMA]" or "$138.00 [Pivot]"
+     * The price comes from the live Alpaca stop order when one exists,
+     * falling back to the DB-tracked stop.
      */
     _formatStopCell(pos) {
         const container = document.createElement('span');
         container.style.whiteSpace = 'nowrap';
-        const price = pos.stop_price || pos.entry_orl;
+        const price = pos.stop_price || pos.current_stop || pos.entry_orl;
 
         if (!price) {
             container.textContent = '\u2014';
@@ -382,9 +468,11 @@ const DashboardPage = {
         }
 
         // Determine stop type from DB flags
-        let typeLabel = 'ORL';
+        let typeLabel = 'Pivot';
         let badgeVariant = 'neutral';
-        if (pos.trailing_stop_active) {
+        if (pos.status === 'PENDING') {
+            typeLabel = 'on fill';
+        } else if (pos.trailing_stop_active) {
             typeLabel = '10SMA';
             badgeVariant = 'info';
         } else if (pos.breakeven_stop_active) {

@@ -146,12 +146,16 @@ async def get_account():
 
 @router.get("/positions")
 async def get_positions():
-    """Return open positions from Alpaca (source of truth).
+    """Return open positions from Alpaca plus pending entries from the DB.
 
     Alpaca's ``get_all_positions()`` determines which positions are
-    actually open.  DB metadata (day count, pipeline mode, ORL/LOD)
-    is merged in as optional enrichment only.
+    actually open.  DB metadata (day count, pipeline mode, stops) is
+    merged in as enrichment.  The live protective stop is discovered
+    from open orders — standalone GTC replacement stops or still-open
+    bracket legs.  DB rows in PENDING state (entry order submitted,
+    not yet filled) are appended so reserved slots are visible.
     """
+    from tradingagents.dashboard.api.alpaca_orders import _serialize_order
     from tradingagents.dashboard.app import get_alpaca_client, get_trade_db
 
     client = get_alpaca_client()
@@ -167,30 +171,33 @@ async def get_positions():
         logger.warning("Failed to get Alpaca positions: %s", exc)
         return {"positions": [], "count": 0, "source": "error: broker_unavailable"}
 
-    # ── Step 2: Bracket order legs for stop/TP prices ──────────
-    bracket_legs: dict = {}
+    # ── Step 2: live protective stops from open orders ─────────
+    stop_by_symbol: dict = {}
     try:
         from alpaca.trading.enums import QueryOrderStatus
-        orders = client.get_orders_nested(status=QueryOrderStatus.OPEN)
-        for order in orders:
-            symbol = order.symbol
-            if hasattr(order, "legs") and order.legs:
-                legs_data = {"stop_price": None, "take_profit_price": None}
-                for leg in order.legs:
-                    leg_type = str(getattr(leg, "order_type", "")).lower()
-                    if "stop" in leg_type:
-                        legs_data["stop_price"] = float(leg.stop_price) if leg.stop_price else None
-                    elif "limit" in leg_type:
-                        legs_data["take_profit_price"] = float(leg.limit_price) if leg.limit_price else None
-                bracket_legs[symbol] = legs_data
+        open_orders = [
+            _serialize_order(o)
+            for o in client.get_orders_nested(status=QueryOrderStatus.OPEN)
+        ]
+        orders_by_symbol: dict = {}
+        for order in open_orders:
+            orders_by_symbol.setdefault(order.get("symbol"), []).append(order)
+        for symbol, orders in orders_by_symbol.items():
+            stop = find_protective_stop(orders)
+            if stop:
+                stop_by_symbol[symbol] = stop
     except Exception as exc:
-        logger.warning("Failed to get bracket legs: %s", exc)
+        logger.warning("Failed to get open orders for stops: %s", exc)
 
     # ── Step 3: DB metadata for enrichment (optional) ──────────
     db_map: dict = {}
+    pending_rows: list = []
     try:
-        for pos in db.get_open_positions():
-            db_map[pos["symbol"]] = pos
+        for pos in db.get_open_positions(include_pending=True):
+            if pos.get("status") == "PENDING":
+                pending_rows.append(pos)
+            else:
+                db_map[pos["symbol"]] = pos
     except Exception:
         pass  # DB enrichment is best-effort
 
@@ -199,11 +206,17 @@ async def get_positions():
     for pos in alpaca_positions:
         symbol = pos.symbol
         db_data = db_map.get(symbol, {})
-        legs = bracket_legs.get(symbol, {})
+        live_stop = stop_by_symbol.get(symbol)
+
+        stop_price = (
+            live_stop.get("stop_price") if live_stop
+            else db_data.get("current_stop") or db_data.get("entry_orl")
+        )
 
         merged.append({
             # Alpaca live data (source of truth)
             "symbol": symbol,
+            "status": "OPEN",
             "entry_price": float(pos.avg_entry_price),
             "current_price": round(float(pos.current_price), 2),
             "current_qty": int(float(pos.qty)),
@@ -216,6 +229,7 @@ async def get_positions():
             "entry_date": db_data.get("entry_date"),
             "entry_orl": db_data.get("entry_orl"),
             "entry_lod": db_data.get("entry_lod"),
+            "current_stop": db_data.get("current_stop"),
             "original_qty": db_data.get("original_qty"),
             "day_count": db_data.get("day_count", 1),
             "trimmed": bool(db_data.get("trimmed", 0)),
@@ -224,9 +238,39 @@ async def get_positions():
             "pipeline_mode": db_data.get("pipeline_mode", "quant"),
             "stop_order_id": db_data.get("stop_order_id"),
 
-            # Bracket legs
-            "stop_price": legs.get("stop_price"),
-            "take_profit_price": legs.get("take_profit_price"),
+            # Live protective stop (standalone GTC or bracket leg)
+            "stop_price": stop_price,
+            "stop_source": "alpaca_order" if live_stop else ("db" if stop_price else None),
+        })
+
+    # ── Step 5: append PENDING entries (reserved slots) ────────
+    alpaca_symbols = {p.symbol for p in alpaca_positions}
+    for pos in pending_rows:
+        if pos["symbol"] in alpaca_symbols:
+            continue  # filled but not yet reconciled — already shown live
+        merged.append({
+            "symbol": pos["symbol"],
+            "status": "PENDING",
+            "entry_price": pos.get("entry_price"),   # intended trigger
+            "current_price": None,
+            "current_qty": int(pos.get("current_qty") or 0),
+            "market_value": None,
+            "unrealized_pl": None,
+            "unrealized_plpc": None,
+            "cost_basis": None,
+            "entry_date": pos.get("entry_date"),
+            "entry_orl": pos.get("entry_orl"),
+            "entry_lod": None,
+            "current_stop": pos.get("current_stop"),
+            "original_qty": pos.get("original_qty"),
+            "day_count": 0,
+            "trimmed": False,
+            "breakeven_stop_active": False,
+            "trailing_stop_active": False,
+            "pipeline_mode": pos.get("pipeline_mode", "quant"),
+            "stop_order_id": pos.get("stop_order_id"),
+            "stop_price": pos.get("entry_orl"),      # bracket stop on fill
+            "stop_source": "bracket_on_fill",
         })
 
     return {"positions": merged, "count": len(merged), "source": "alpaca_live"}
