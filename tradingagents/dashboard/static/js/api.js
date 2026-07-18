@@ -70,17 +70,6 @@ const API = {
 
     // ── Orders ────────────────────────────────────────────────
 
-    /** Get orders with optional filters. */
-    async getOrders(params = {}) {
-        const query = new URLSearchParams(params).toString();
-        return this._fetch(`/api/orders${query ? '?' + query : ''}`);
-    },
-
-    /** Get single order detail with bracket legs. */
-    async getOrder(orderId) {
-        return this._fetch(`/api/orders/${encodeURIComponent(orderId)}`);
-    },
-
     /** Get orders directly from Alpaca API with bracket leg expansion. */
     async getAlpacaOrders(params = {}) {
         const query = new URLSearchParams(params).toString();

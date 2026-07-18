@@ -105,7 +105,6 @@ from tradingagents.dashboard.api.portfolio import router as portfolio_router
 from tradingagents.dashboard.api.stream import router as stream_router
 from tradingagents.dashboard.api.snapshots import router as snapshots_router
 from tradingagents.dashboard.api.screening import router as screening_router
-from tradingagents.dashboard.api.orders import router as orders_router
 from tradingagents.dashboard.api.alpaca_orders import router as alpaca_orders_router
 from tradingagents.dashboard.api.comparison import router as comparison_router
 from tradingagents.dashboard.api.config import router as config_router
@@ -116,7 +115,6 @@ app.include_router(portfolio_router, prefix="/api", tags=["portfolio"])
 app.include_router(stream_router, prefix="/api", tags=["stream"])
 app.include_router(snapshots_router, prefix="/api", tags=["snapshots"])
 app.include_router(screening_router, prefix="/api", tags=["screening"])
-app.include_router(orders_router, prefix="/api", tags=["orders"])
 app.include_router(alpaca_orders_router, prefix="/api", tags=["alpaca-orders"])
 app.include_router(comparison_router, prefix="/api", tags=["comparison"])
 app.include_router(config_router, prefix="/api", tags=["config"])

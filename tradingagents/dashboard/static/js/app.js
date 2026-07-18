@@ -22,9 +22,9 @@ const App = {
         // Register page modules
         this._pages = {
             'dashboard': DashboardPage,
-            'orders': OrdersPage,
+            'orders': AlpacaPage,      // live Alpaca orders — the DB orders page is gone
             'positions': PositionPage,
-            'alpaca': AlpacaPage,
+            'alpaca': AlpacaPage,      // legacy alias for bookmarks
             'compare': ABPage,
             'config': ConfigPage,
             'logs': LogsPage,

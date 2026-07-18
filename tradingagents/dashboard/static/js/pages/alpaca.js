@@ -1,13 +1,13 @@
 /**
- * TradingAgents Dashboard — Alpaca Account Page
+ * TradingAgents Dashboard — Orders Page (live from Alpaca)
  *
- * Shows live data from the Alpaca brokerage API:
- * - Account overview (equity, cash, buying power)
- * - Account status and trading permissions
- * - P&L
- * - Live orders with bracket leg expansion (stop/TP prices)
+ * The single source of truth for order data:
+ * - Live orders with inline trigger prices (a sell-stop shows its stop
+ *   price on the row) and bracket leg expansion
+ * - Every row click-expands to full detail (ids, timestamps, fills, TIF)
+ * - Account overview (equity, cash, buying power, status, P&L) below
  *
- * Accessed via /alpaca
+ * Accessed via /orders (also /alpaca for old bookmarks).
  */
 
 const AlpacaPage = {
@@ -19,27 +19,77 @@ const AlpacaPage = {
         header.className = 'page-header fade-in';
         const title = document.createElement('h1');
         title.className = 'page-header__title';
-        title.textContent = 'Alpaca Account';
+        title.textContent = 'Orders';
         const subtitle = document.createElement('div');
         subtitle.className = 'page-header__subtitle';
-        subtitle.textContent = 'Live brokerage data — the source of truth';
+        subtitle.textContent = 'Live from the Alpaca API — the source of truth';
         header.appendChild(title);
         header.appendChild(subtitle);
         container.appendChild(header);
 
-        // Content
-        const content = document.createElement('div');
-        content.className = 'fade-in';
-        content.id = 'alpaca-content';
-        content.appendChild(Components.emptyState('\u23F3', 'Loading account data...'));
-        container.appendChild(content);
+        // ── Orders section (the hero) ─────────────────────────
+        const ordersSection = document.createElement('div');
+        ordersSection.className = 'fade-in';
 
-        // Load data
-        const account = await API.getAccount();
-        this._renderAccount(content, account);
+        // Filter bar
+        const filterCard = Components.card({ id: 'alpaca-orders-filters' });
+
+        const filterBar = document.createElement('div');
+        filterBar.className = 'filter-bar';
+
+        const statusSelect = document.createElement('select');
+        statusSelect.className = 'filter-select';
+        statusSelect.id = 'alpaca-order-filter';
+        [
+            { value: 'all', label: 'All Orders' },
+            { value: 'open', label: 'Open Only' },
+            { value: 'closed', label: 'Closed (Filled/Cancelled)' },
+        ].forEach(opt => {
+            const option = document.createElement('option');
+            option.value = opt.value;
+            option.textContent = opt.label;
+            statusSelect.appendChild(option);
+        });
+        statusSelect.addEventListener('change', () => this._loadAlpacaOrders(statusSelect.value));
+        filterBar.appendChild(statusSelect);
+
+        const src = document.createElement('span');
+        src.className = 'filter-source';
+        src.innerHTML = '<span class="status-dot status-dot--running"></span> Live from Alpaca API · click a row for details';
+        filterBar.appendChild(src);
+
+        filterCard.appendChild(filterBar);
+        ordersSection.appendChild(filterCard);
+
+        // Orders list
+        const ordersCard = Components.card({ title: 'Orders', icon: '\u{1F4DC}', id: 'alpaca-orders-card' });
+        const ordersList = document.createElement('div');
+        ordersList.id = 'alpaca-orders-list';
+        ordersList.appendChild(Components.emptyState('⏳', 'Loading orders...'));
+        ordersCard.appendChild(ordersList);
+        ordersSection.appendChild(ordersCard);
+
+        container.appendChild(ordersSection);
+
+        // ── Account section (below orders) ────────────────────
+        const accountSection = document.createElement('div');
+        accountSection.className = 'fade-in';
+        accountSection.id = 'alpaca-account-section';
+        accountSection.style.marginTop = 'var(--space-lg)';
+        accountSection.appendChild(Components.emptyState('⏳', 'Loading account data...'));
+        container.appendChild(accountSection);
+
+        // Async loads (orders first — they're the point of this page)
+        this._loadAlpacaOrders('all');
+        API.getAccount().then(account => {
+            const section = document.getElementById('alpaca-account-section');
+            if (section) this._renderAccount(section, account);
+        });
     },
 
     destroy() {},
+
+    // ── Account cards ─────────────────────────────────────────
 
     _renderAccount(container, account) {
         container.innerHTML = '';
@@ -71,7 +121,6 @@ const AlpacaPage = {
             return;
         }
 
-        // ── Top row: Account cards (2-col grid) ───────────────
         const grid = document.createElement('div');
         grid.className = 'bento-grid bento-grid--2col';
 
@@ -104,17 +153,17 @@ const AlpacaPage = {
         grid.appendChild(overviewCard);
 
         // Card 2: Account Status
-        const statusCard = Components.card({ title: 'Account Status', icon: '\u{1F6E1}\uFE0F', id: 'alpaca-status' });
+        const statusCard = Components.card({ title: 'Account Status', icon: '\u{1F6E1}️', id: 'alpaca-status' });
 
         const statusFields = [
-            { label: 'Account Number', value: this._str(account.account_number) || '\u2014' },
-            { label: 'Status', value: this._str(account.status) || '\u2014', badge: this._statusVariant(account.status) },
+            { label: 'Account Number', value: this._str(account.account_number) || '—' },
+            { label: 'Status', value: this._str(account.status) || '—', badge: this._statusVariant(account.status) },
             { label: 'Currency', value: this._str(account.currency) || 'USD' },
             { label: 'Pattern Day Trader', value: account.pattern_day_trader ? 'Yes' : 'No', badge: account.pattern_day_trader ? 'danger' : 'success' },
             { label: 'Trading Blocked', value: account.trading_blocked ? 'BLOCKED' : 'Active', badge: account.trading_blocked ? 'danger' : 'success' },
             { label: 'Account Blocked', value: account.account_blocked ? 'BLOCKED' : 'Active', badge: account.account_blocked ? 'danger' : 'success' },
             { label: 'Shorting Enabled', value: account.shorting_enabled ? 'Yes' : 'No' },
-            { label: 'Crypto Status', value: this._str(account.crypto_status) || '\u2014' },
+            { label: 'Crypto Status', value: this._str(account.crypto_status) || '—' },
         ];
 
         statusFields.forEach(s => {
@@ -196,53 +245,6 @@ const AlpacaPage = {
 
         grid.appendChild(rawCard);
         container.appendChild(grid);
-
-        // ── Alpaca Orders Section (full width, below grid) ────
-        const ordersSection = document.createElement('div');
-        ordersSection.style.marginTop = 'var(--space-lg)';
-
-        // Filter bar
-        const filterCard = Components.card({ id: 'alpaca-orders-filters' });
-
-        const filterBar = document.createElement('div');
-        filterBar.className = 'filter-bar';
-
-        const statusSelect = document.createElement('select');
-        statusSelect.className = 'filter-select';
-        statusSelect.id = 'alpaca-order-filter';
-        [
-            { value: 'all', label: 'All Orders' },
-            { value: 'open', label: 'Open Only' },
-            { value: 'closed', label: 'Closed (Filled/Cancelled)' },
-        ].forEach(opt => {
-            const option = document.createElement('option');
-            option.value = opt.value;
-            option.textContent = opt.label;
-            statusSelect.appendChild(option);
-        });
-        statusSelect.addEventListener('change', () => this._loadAlpacaOrders(statusSelect.value));
-        filterBar.appendChild(statusSelect);
-
-        const src = document.createElement('span');
-        src.className = 'filter-source';
-        src.innerHTML = '<span class="status-dot status-dot--running"></span> Live from Alpaca API';
-        filterBar.appendChild(src);
-
-        filterCard.appendChild(filterBar);
-        ordersSection.appendChild(filterCard);
-
-        // Orders list
-        const ordersCard = Components.card({ title: 'Alpaca Orders', icon: '\u{1F4DC}', id: 'alpaca-orders-card' });
-        const ordersList = document.createElement('div');
-        ordersList.id = 'alpaca-orders-list';
-        ordersList.appendChild(Components.emptyState('\u23F3', 'Loading orders...'));
-        ordersCard.appendChild(ordersList);
-        ordersSection.appendChild(ordersCard);
-
-        container.appendChild(ordersSection);
-
-        // Load orders
-        this._loadAlpacaOrders('all');
     },
 
     // ── Alpaca Orders ─────────────────────────────────────────
@@ -266,9 +268,9 @@ const AlpacaPage = {
 
         [
             { label: 'Total', value: summary.total || 0, icon: '\u{1F4CB}' },
-            { label: 'Filled', value: summary.filled || 0, icon: '\u2705' },
+            { label: 'Filled', value: summary.filled || 0, icon: '✅' },
             { label: 'Open', value: summary.open || 0, icon: '\u{1F7E2}' },
-            { label: 'Cancelled', value: summary.canceled || 0, icon: '\u274C' },
+            { label: 'Cancelled', value: summary.canceled || 0, icon: '❌' },
             { label: 'Bracket', value: summary.bracket_orders || 0, icon: '\u{1F3AF}' },
         ].forEach(s => {
             const stat = document.createElement('div');
@@ -301,7 +303,7 @@ const AlpacaPage = {
 
         const symbol = document.createElement('span');
         symbol.className = 'order-row__symbol';
-        symbol.textContent = order.symbol || '\u2014';
+        symbol.textContent = order.symbol || '—';
         left.appendChild(symbol);
 
         const side = this._str(order.side);
@@ -318,7 +320,7 @@ const AlpacaPage = {
 
         main.appendChild(left);
 
-        // Center: qty and price
+        // Center: qty, trigger and fill prices
         const center = document.createElement('div');
         center.className = 'order-row__center';
 
@@ -327,6 +329,20 @@ const AlpacaPage = {
         qty.textContent = `${order.filled_qty || 0}/${order.qty || 0} shares`;
         center.appendChild(qty);
 
+        // The order's own trigger — a sell-stop shows its stop price here
+        if (order.stop_price) {
+            const trigger = document.createElement('span');
+            trigger.className = 'order-row__price text-danger';
+            trigger.textContent = `stop ${Components.formatMoney(order.stop_price)}`;
+            center.appendChild(trigger);
+        }
+        if (order.limit_price) {
+            const lim = document.createElement('span');
+            lim.className = 'order-row__price text-success';
+            lim.textContent = `limit ${Components.formatMoney(order.limit_price)}`;
+            center.appendChild(lim);
+        }
+
         if (order.filled_avg_price) {
             const price = document.createElement('span');
             price.className = 'order-row__price';
@@ -334,7 +350,7 @@ const AlpacaPage = {
             center.appendChild(price);
         }
 
-        // Show SL/TP inline if present
+        // Bracket SL/TP inline chips
         if (order.stop_loss_price) {
             const sl = document.createElement('span');
             sl.className = 'order-row__price text-danger';
@@ -364,26 +380,68 @@ const AlpacaPage = {
 
         main.appendChild(right);
 
-        // Click to expand bracket legs
-        if (order.legs && order.legs.length > 0) {
-            main.style.cursor = 'pointer';
-            main.addEventListener('click', () => {
-                const detail = wrapper.querySelector('.order-row__legs');
-                if (detail) {
-                    detail.style.display = detail.style.display === 'none' ? '' : 'none';
-                }
-            });
-        }
+        // Every row expands to full detail on click
+        const detail = this._createOrderDetail(order);
+        main.style.cursor = 'pointer';
+        main.addEventListener('click', () => {
+            detail.style.display = detail.style.display === 'none' ? '' : 'none';
+        });
 
         wrapper.appendChild(main);
+        wrapper.appendChild(detail);
 
-        // Bracket legs (expandable)
+        return wrapper;
+    },
+
+    /**
+     * Full detail panel for any order: ids, timestamps, fills, TIF —
+     * plus the bracket leg breakdown when legs exist.
+     */
+    _createOrderDetail(order) {
+        const container = document.createElement('div');
+        container.className = 'order-row__legs';
+        container.style.display = 'none';
+
+        // Field grid
+        const fields = document.createElement('div');
+        fields.style.cssText =
+            'display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); ' +
+            'gap: 4px 24px; padding: 4px 0 8px;';
+
+        const tif = this._str(order.time_in_force).toUpperCase();
+        const items = [
+            ['Order ID', order.id || '—', true],
+            ['Time in Force', tif || '—'],
+            ['Submitted', this._fmtTime(order.submitted_at || order.created_at)],
+            ['Filled', order.filled_at ? this._fmtTime(order.filled_at) : '—'],
+            ['Cancelled', order.canceled_at ? this._fmtTime(order.canceled_at) : null],
+            ['Expired', order.expired_at ? this._fmtTime(order.expired_at) : null],
+            ['Filled Qty', `${order.filled_qty || 0} / ${order.qty || 0}`],
+            ['Avg Fill Price', order.filled_avg_price ? Components.formatMoney(order.filled_avg_price) : '—'],
+            ['Stop Trigger', order.stop_price ? Components.formatMoney(order.stop_price) : null],
+            ['Limit Price', order.limit_price ? Components.formatMoney(order.limit_price) : null],
+        ];
+
+        items.forEach(([label, value, mono]) => {
+            if (value === null) return; // omit fields with nothing to say
+            const row = document.createElement('div');
+            row.className = 'stat-row';
+            const labelEl = document.createElement('span');
+            labelEl.className = 'stat-row__label';
+            labelEl.textContent = label;
+            row.appendChild(labelEl);
+            const valueEl = document.createElement('span');
+            valueEl.className = 'stat-row__value';
+            if (mono) valueEl.style.cssText = 'font-family: monospace; font-size: 0.7rem;';
+            valueEl.textContent = value;
+            row.appendChild(valueEl);
+            fields.appendChild(row);
+        });
+
+        container.appendChild(fields);
+
+        // Bracket legs breakdown (when present)
         if (order.legs && order.legs.length > 0) {
-            const legsContainer = document.createElement('div');
-            legsContainer.className = 'order-row__legs';
-            legsContainer.style.display = 'none';
-
-            // Summary chips
             const summary = document.createElement('div');
             summary.className = 'bracket-summary';
 
@@ -409,9 +467,8 @@ const AlpacaPage = {
                 summary.appendChild(tp);
             }
 
-            legsContainer.appendChild(summary);
+            container.appendChild(summary);
 
-            // Individual legs
             order.legs.forEach(leg => {
                 const legRow = document.createElement('div');
                 legRow.className = 'order-leg';
@@ -432,20 +489,18 @@ const AlpacaPage = {
                 const legStatus = this._str(leg.status);
                 legRow.appendChild(Components.badge(legStatus.toUpperCase(), this._orderStatusVariant(legStatus)));
 
-                legsContainer.appendChild(legRow);
+                container.appendChild(legRow);
             });
-
-            wrapper.appendChild(legsContainer);
         }
 
-        return wrapper;
+        return container;
     },
 
     // ── Helpers ────────────────────────────────────────────────
 
     _fmt(val) {
-        if (val == null || val === '') return '$\u2014';
-        if (typeof val === 'object') return '$\u2014';
+        if (val == null || val === '') return '$—';
+        if (typeof val === 'object') return '$—';
         const num = parseFloat(val);
         return isNaN(num) ? String(val) : Components.formatMoney(num);
     },
@@ -478,7 +533,7 @@ const AlpacaPage = {
     },
 
     _fmtTime(isoStr) {
-        if (!isoStr) return '\u2014';
+        if (!isoStr) return '—';
         try {
             return new Date(isoStr).toLocaleDateString('en-US', {
                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
