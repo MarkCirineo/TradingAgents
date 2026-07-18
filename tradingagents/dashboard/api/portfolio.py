@@ -236,22 +236,195 @@ async def get_positions():
 # /api/positions/{symbol}
 # ---------------------------------------------------------------------------
 
+def _is_sell_stop(order: dict) -> bool:
+    """True when *order* is a protective sell-stop (standalone or leg)."""
+    side = str(order.get("side") or "").lower()
+    otype = str(order.get("order_type") or order.get("type") or "").lower()
+    return "sell" in side and "stop" in otype
+
+
+def _order_is_open(order: dict) -> bool:
+    status = str(order.get("status") or "").lower()
+    return status in ("new", "accepted", "held", "pending_new", "partially_filled")
+
+
+def find_protective_stop(orders: list[dict]) -> Optional[dict]:
+    """Find the live protective sell-stop among serialized Alpaca orders.
+
+    The daemon replaces the entry bracket's stop leg with standalone GTC
+    stops as it raises the stop, so the live stop may be either a
+    top-level order or a still-open bracket leg.  Shared with the
+    positions list endpoint (Phase B).
+    """
+    candidates = []
+    for order in orders:
+        if _is_sell_stop(order) and _order_is_open(order):
+            candidates.append(order)
+        for leg in order.get("legs", []):
+            if _is_sell_stop(leg) and _order_is_open(leg):
+                candidates.append(leg)
+    if not candidates:
+        return None
+    # Most recently submitted wins (latest stop raise)
+    candidates.sort(key=lambda o: o.get("submitted_at") or "", reverse=True)
+    return candidates[0]
+
+
+def _build_lifecycle_events(pos: dict, orders: list[dict]) -> list[dict]:
+    """Derive a lifecycle timeline from the DB row + Alpaca order history."""
+    timed: list[dict] = []
+    untimed: list[dict] = []
+
+    def add(ts, label, detail, variant):
+        item = {"ts": ts or "", "label": label, "detail": detail, "variant": variant}
+        (timed if ts else untimed).append(item)
+
+    def _money(val):
+        try:
+            return f"${float(val):,.2f}"
+        except (TypeError, ValueError):
+            return "$—"
+
+    # -- entry order ----------------------------------------------------
+    entry_id = pos.get("entry_order_id") or pos.get("stop_order_id")
+    entry_order = next((o for o in orders if o.get("id") == entry_id), None)
+    if entry_order is None:
+        buys = [
+            o for o in orders
+            if "buy" in str(o.get("side") or "").lower() and not o.get("parent_id")
+        ]
+        buys.sort(key=lambda o: o.get("submitted_at") or "")
+        entry_order = buys[0] if buys else None
+
+    if entry_order:
+        otype = str(entry_order.get("order_type") or entry_order.get("type") or "?")
+        ref_price = entry_order.get("stop_price") or entry_order.get("limit_price")
+        detail = f"{otype} order, {int(float(entry_order.get('qty') or 0))} shares"
+        if ref_price:
+            detail += f" @ {_money(ref_price)} trigger"
+        add(entry_order.get("submitted_at"), "Entry submitted", detail, "info")
+
+        if entry_order.get("filled_at"):
+            add(
+                entry_order.get("filled_at"),
+                "Entry filled",
+                f"{int(float(entry_order.get('filled_qty') or 0))} shares "
+                f"@ {_money(entry_order.get('filled_avg_price'))}",
+                "primary",
+            )
+        elif str(entry_order.get("status") or "").lower() in ("canceled", "cancelled", "expired"):
+            add(
+                entry_order.get("canceled_at") or entry_order.get("expired_at"),
+                "Entry cancelled",
+                "Pivot never triggered",
+                "neutral",
+            )
+    elif pos.get("entry_date"):
+        add(
+            pos.get("entry_date"),
+            "Entry submitted" if pos.get("status") == "PENDING" else "Opened",
+            f"{int(pos.get('original_qty') or pos.get('current_qty') or 0)} shares "
+            f"@ {_money(pos.get('entry_price'))}",
+            "info" if pos.get("status") == "PENDING" else "primary",
+        )
+
+    # -- initial stop ---------------------------------------------------
+    if pos.get("entry_orl"):
+        add(
+            (entry_order or {}).get("filled_at") or pos.get("entry_date"),
+            "Initial stop set",
+            f"{_money(pos.get('entry_orl'))} (consolidation pivot floor)",
+            "danger",
+        )
+
+    # -- subsequent sell orders: stop raises, trims, exits --------------
+    for order in orders:
+        if entry_order and order.get("id") == entry_order.get("id"):
+            continue
+        side = str(order.get("side") or "").lower()
+        if "sell" not in side:
+            continue
+        otype = str(order.get("order_type") or order.get("type") or "").lower()
+        status = str(order.get("status") or "").lower()
+
+        if "stop" in otype:
+            if status == "filled":
+                add(
+                    order.get("filled_at"), "Stopped out",
+                    f"{int(float(order.get('filled_qty') or 0))} shares "
+                    f"@ {_money(order.get('filled_avg_price'))}",
+                    "danger",
+                )
+            elif _order_is_open(order):
+                add(
+                    order.get("submitted_at"), "Stop raised",
+                    f"{_money(order.get('stop_price'))} (current, GTC)",
+                    "warning",
+                )
+            else:
+                add(
+                    order.get("submitted_at"), "Stop raised",
+                    f"{_money(order.get('stop_price'))} (later superseded)",
+                    "neutral",
+                )
+        elif status == "filled":
+            add(
+                order.get("filled_at"), "Sold",
+                f"{int(float(order.get('filled_qty') or 0))} shares "
+                f"@ {_money(order.get('filled_avg_price'))}",
+                "warning",
+            )
+
+    # -- DB state flags -------------------------------------------------
+    if pos.get("trimmed"):
+        add(
+            pos.get("trim_date"), "Trimmed",
+            f"{int(pos.get('current_qty') or 0)} shares remaining", "warning",
+        )
+    if pos.get("breakeven_stop_active"):
+        untimed.append({
+            "ts": "", "label": "Breakeven stop active",
+            "detail": f"Stop at entry: {_money(pos.get('entry_price'))}",
+            "variant": "info",
+        })
+    if pos.get("trailing_stop_active"):
+        untimed.append({
+            "ts": "", "label": "Trailing stop active",
+            "detail": "Tracking the 10-day SMA", "variant": "success",
+        })
+    if pos.get("status") == "CLOSED":
+        add(
+            pos.get("closed_at"), "Closed",
+            pos.get("close_reason") or "Manual", "neutral",
+        )
+    elif pos.get("status") == "CANCELLED":
+        add(
+            pos.get("closed_at"), "Entry cancelled",
+            pos.get("close_reason") or "Never filled", "neutral",
+        )
+
+    timed.sort(key=lambda e: e["ts"])
+    return timed + untimed
+
+
 @router.get("/positions/{symbol}")
 async def get_position_detail(symbol: str):
     """Return detailed position info for a single symbol.
 
-    Alpaca is the source of truth for whether the position exists.
-    DB data provides optional enrichment (entry ORL/LOD, pipeline mode,
-    day count, etc.).  Bracket order legs and related DB orders are
-    included when available.
+    Alpaca is the source of truth: live position data, the actual open
+    protective stop order (standalone GTC or bracket leg), and the full
+    order history for the symbol.  The DB row supplies strategy metadata
+    (initial stop, day count, pipeline mode, trim state) and covers
+    PENDING entries that have no Alpaca position yet.
     """
+    from tradingagents.dashboard.api.alpaca_orders import _serialize_order
     from tradingagents.dashboard.app import get_alpaca_client, get_trade_db
 
     client = get_alpaca_client()
     db = get_trade_db()
     symbol = symbol.upper()
 
-    # ── Primary: Alpaca live position ──────────────────────────
+    # ── Live Alpaca position ───────────────────────────────────
     live_data = {}
     if client:
         try:
@@ -269,45 +442,71 @@ async def get_position_detail(symbol: str):
         except Exception as exc:
             logger.warning("Failed to get Alpaca position for %s: %s", symbol, exc)
 
-    # ── Enrichment: DB position metadata ───────────────────────
+    # ── DB position metadata ───────────────────────────────────
     db_pos = db.get_position(symbol)
 
     # If neither Alpaca nor DB knows this symbol, 404
     if not live_data and not db_pos:
         raise HTTPException(404, f"No position found for {symbol}")
 
-    # Build a merged position dict (Alpaca wins for price data)
-    pos = db_pos or {}
+    # Merged view: Alpaca wins for anything it knows (the DB entry
+    # price is the intended signal price until fill reconciliation
+    # runs; Alpaca's avg_entry_price is the actual fill).
+    pos = dict(db_pos) if db_pos else {}
     if live_data:
         pos["current_price"] = live_data["current_price"]
         pos["market_value"] = live_data["market_value"]
         pos["unrealized_pl"] = live_data["unrealized_pl"]
         pos["unrealized_plpc"] = live_data["unrealized_plpc"]
-        pos.setdefault("entry_price", live_data["avg_entry_price"])
+        pos["entry_price"] = live_data["avg_entry_price"]
         pos.setdefault("current_qty", int(live_data.get("qty", 0)))
+        pos.setdefault("status", "OPEN")
 
-    # ── Bracket order legs ─────────────────────────────────────
-    bracket_info = {}
-    stop_order_id = pos.get("stop_order_id") if pos else None
-    if client and stop_order_id:
+    # ── Full Alpaca order history for this symbol ──────────────
+    alpaca_orders: list[dict] = []
+    if client:
         try:
-            order = client.get_order_nested(stop_order_id)
-            if order and hasattr(order, "legs") and order.legs:
-                bracket_info = {
-                    "parent_order": _serialize_alpaca_obj(order),
-                    "legs": [_serialize_alpaca_obj(leg) for leg in order.legs],
-                }
+            from alpaca.trading.enums import QueryOrderStatus
+            raw = client.get_orders_nested(
+                status=QueryOrderStatus.ALL, symbols=[symbol]
+            )
+            alpaca_orders = [_serialize_order(o) for o in raw]
         except Exception as exc:
-            logger.warning("Failed to get bracket info for %s: %s", symbol, exc)
+            logger.warning("Failed to get Alpaca orders for %s: %s", symbol, exc)
 
-    # ── Related orders from DB ─────────────────────────────────
-    related_orders = db.get_orders_for_symbol(symbol)
+    # ── Protection: initial stop vs live stop ──────────────────
+    live_stop = find_protective_stop(alpaca_orders)
+    initial_stop = pos.get("entry_orl")
+    current_stop = (
+        live_stop.get("stop_price") if live_stop
+        else pos.get("current_stop") or initial_stop
+    )
+    entry_price = pos.get("entry_price") or 0
+    risk_per_share = (
+        round(entry_price - initial_stop, 4)
+        if entry_price and initial_stop else None
+    )
+    r_multiple = None
+    if risk_per_share and risk_per_share > 0 and live_data:
+        r_multiple = round(
+            (live_data["current_price"] - entry_price) / risk_per_share, 2
+        )
+
+    protection = {
+        "initial_stop": initial_stop,
+        "current_stop": current_stop,
+        "stop_order": live_stop,          # None when no live stop order found
+        "stop_source": "alpaca_order" if live_stop else "db",
+        "risk_per_share": risk_per_share,
+        "r_multiple": r_multiple,
+    }
 
     return {
         "position": pos,
         "live": live_data,
-        "bracket": bracket_info,
-        "orders": related_orders,
+        "protection": protection,
+        "orders": alpaca_orders,
+        "events": _build_lifecycle_events(pos, alpaca_orders),
         "source": "alpaca_live" if live_data else "db_only",
     }
 

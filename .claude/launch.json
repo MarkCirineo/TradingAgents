@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-dev",
+      "runtimeExecutable": "D:\\Github\\sandbox\\TradingAgents\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["D:\\Github\\sandbox\\TradingAgents\\scripts\\run_dashboard_dev.py"],
+      "port": 8055
+    }
+  ]
+}
