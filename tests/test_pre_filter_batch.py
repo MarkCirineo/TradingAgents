@@ -201,7 +201,7 @@ class TestCheckSemantics:
 
     def test_already_held_rejected(self):
         class StubDB:
-            def get_open_positions(self):
+            def get_open_positions(self, include_pending=False):
                 return [{"symbol": "AAA"}]
 
         client = StubDataClient({"AAA": _passing_bars(), "SPY": _flat_spy_bars()})

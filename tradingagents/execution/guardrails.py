@@ -117,8 +117,11 @@ class Guardrails:
         checks["regime_pause"] = False
 
         # 1. Already held?
+        # include_pending: an unfilled buy-stop entry still reserves a
+        # position slot — otherwise N submitted stops could all trigger
+        # and blow past max_concurrent_positions.
         if self._db:
-            open_positions = self._db.get_open_positions()
+            open_positions = self._db.get_open_positions(include_pending=True)
             held_symbols = {p["symbol"] for p in open_positions}
 
             if symbol in held_symbols:

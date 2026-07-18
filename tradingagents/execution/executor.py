@@ -85,6 +85,7 @@ class Executor:
         self._client = alpaca_client
         self._db = trade_db
         cfg = config or DEFAULT_CONFIG
+        self._pipeline_mode = cfg.get("pipeline_mode", "full")
         sizing = get_sizing_params(cfg)
 
         # Regime-adjusted risk percentage (VIX modulation)
@@ -311,7 +312,10 @@ class Executor:
                 reason=f"order submission failed: {exc}",
             )
 
-        # 5. Record in trade DB
+        # 5. Record in trade DB — as PENDING until the fill is confirmed.
+        #    A buy-stop entry may never trigger; fill reconciliation
+        #    (daily_workflow) promotes to OPEN with the actual fill price
+        #    or retires the row if the order is cancelled/expired.
         if self._db:
             try:
                 self._db.record_order(
@@ -331,13 +335,17 @@ class Executor:
                     entry_orl=signal.stop_price,
                     qty=shares,
                     stop_order_id=order_id,
+                    entry_order_id=order_id,
+                    pipeline_mode=self._pipeline_mode,
+                    status="PENDING",
                 )
             except Exception as exc:
                 logger.warning("DB record failed (order still live): %s", exc)
 
         logger.info(
-            "Executor: FILLED %s — %d shares @ $%.2f, stop @ $%.2f, order=%s",
-            signal.symbol, shares, signal.entry_price, signal.stop_price, order_id,
+            "Executor: SUBMITTED %s — %d shares @ $%.2f (%s), stop @ $%.2f, order=%s",
+            signal.symbol, shares, signal.entry_price, signal.entry_type,
+            signal.stop_price, order_id,
         )
 
         notify(

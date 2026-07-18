@@ -97,7 +97,7 @@ class PositionManager:
                     action.symbol,
                     pos.get("day_count", 0),
                     bool(pos.get("trimmed", 0)),
-                    pos.get("entry_orl", 0),
+                    pos.get("current_stop") or pos.get("entry_orl", 0),
                 )
             else:
                 logger.info(
@@ -114,7 +114,9 @@ class PositionManager:
         """
         symbol = pos["symbol"]
         entry_price = pos.get("entry_price", 0)
-        current_stop = pos.get("entry_orl", 0)
+        # current_stop is the live stop; entry_orl (initial stop) is the
+        # fallback for legacy rows written before the split.
+        current_stop = pos.get("current_stop") or pos.get("entry_orl", 0)
         day_count = pos.get("day_count", 1)
         trimmed = pos.get("trimmed", False)
 

@@ -313,9 +313,10 @@ class PreFilter:
             spy_bars = self._fetch_bars_single("SPY")
         has_bars = bars is not None and not bars.empty
 
-        # 1. Already held?
+        # 1. Already held? (pending entries count — don't re-screen a
+        # symbol that already has a live entry order)
         if self._trade_db:
-            positions = self._trade_db.get_open_positions()
+            positions = self._trade_db.get_open_positions(include_pending=True)
             held_symbols = {p["symbol"] for p in positions}
             already_held = symbol in held_symbols
             checks["already_held"] = not already_held

@@ -536,6 +536,12 @@ class DailyWorkflow:
             "Entry window complete: %d entries submitted",
             len(self._ctx.entries_submitted),
         )
+
+        # Immediately confirm fills for market-order entries (breakout
+        # already confirmed at submission); buy-stops stay PENDING until
+        # a later reconciliation pass sees them trigger.
+        self._reconcile_pending_entries()
+
         return self._ctx
 
     def _quant_decisions(self, candidates: List[str]) -> Dict[str, Optional[str]]:
@@ -610,6 +616,10 @@ class DailyWorkflow:
 
         self._ensure_components()
 
+        # Promote buy-stop entries that triggered this morning to OPEN
+        # (and pick up their actual fill prices) before managing positions.
+        self._reconcile_pending_entries()
+
         from tradingagents.execution.position_manager import PositionManager
 
         pm = PositionManager(
@@ -637,6 +647,12 @@ class DailyWorkflow:
             self._ctx = DayContext(date=date.today().isoformat())
 
         self._ensure_components()
+
+        # Final fill check for the day.  Unfilled buy-stop entries get
+        # cancelled here: the pivot breakout didn't happen today, so the
+        # setup is dead (the GTC entry order would otherwise linger and
+        # could fire days later on a stale signal).
+        self._reconcile_pending_entries(cancel_unfilled=True)
 
         from tradingagents.execution.position_manager import PositionManager
 
@@ -667,6 +683,10 @@ class DailyWorkflow:
             self._ctx = DayContext(date=date.today().isoformat())
 
         self._ensure_components()
+
+        # Catch any entry fills/cancellations not yet synced (safety net
+        # in case eod_check didn't run — e.g. daemon restart).
+        self._reconcile_pending_entries(cancel_unfilled=True)
 
         # Reconcile our DB with Alpaca's actual positions.
         # This cleans up stale test data and positions closed externally.
@@ -733,6 +753,95 @@ class DailyWorkflow:
 
     # -- reconciliation -----------------------------------------------------
 
+    def _reconcile_pending_entries(self, cancel_unfilled: bool = False):
+        """Sync PENDING positions with their Alpaca entry-order status.
+
+        Positions are recorded as PENDING at submission (a buy-stop entry
+        may never trigger).  This polls the entry order and:
+
+        - **filled** -> promotes to OPEN with the actual fill price/date
+        - **cancelled/expired/rejected** -> retires the row quietly
+          (no phantom position for exit logic to trip over)
+        - **still working** -> leaves it pending; with *cancel_unfilled*
+          (EOD), cancels the order first — a pivot breakout that didn't
+          trigger the same day is a dead setup, and the GTC entry would
+          otherwise linger and fire days later.
+        """
+        if not (self._trade_db and self._alpaca_client):
+            return
+
+        pending = self._trade_db.get_pending_positions()
+        if not pending:
+            return
+
+        _DEAD = {"canceled", "cancelled", "expired", "rejected", "replaced"}
+
+        for pos in pending:
+            symbol = pos["symbol"]
+            order_id = pos.get("entry_order_id") or pos.get("stop_order_id")
+            if not order_id:
+                # Legacy row with no order reference — assume filled
+                # (pre-fill-tracking behavior).
+                self._trade_db.mark_position_filled(symbol)
+                continue
+
+            try:
+                order = self._alpaca_client.get_order_by_id(order_id)
+            except Exception as exc:
+                logger.warning(
+                    "Fill check failed for %s (order %s): %s",
+                    symbol, order_id, exc,
+                )
+                continue
+
+            status = str(getattr(order, "status", "")).lower().replace(
+                "orderstatus.", ""
+            )
+            filled_qty = float(getattr(order, "filled_qty", None) or 0)
+
+            if status == "filled" or filled_qty > 0:
+                raw_price = getattr(order, "filled_avg_price", None)
+                fill_price = float(raw_price) if raw_price else None
+                filled_at = getattr(order, "filled_at", None)
+                fill_date = (
+                    filled_at.date().isoformat()
+                    if hasattr(filled_at, "date") else None
+                )
+                self._trade_db.mark_position_filled(
+                    symbol,
+                    fill_price=fill_price,
+                    fill_date=fill_date,
+                    fill_qty=filled_qty if 0 < filled_qty < pos["current_qty"] else None,
+                )
+                self._trade_db.update_order_status(order_id, "FILLED", fill_price)
+                logger.info(
+                    "ENTRY CONFIRMED: %s — %d shares filled @ $%.2f",
+                    symbol, int(filled_qty or pos["current_qty"]),
+                    fill_price or pos["entry_price"],
+                )
+
+            elif status in _DEAD:
+                self._trade_db.cancel_pending_position(symbol)
+                self._trade_db.update_order_status(order_id, "CANCELLED")
+                logger.info(
+                    "ENTRY NEVER FILLED: %s — order %s (%s), position retired",
+                    symbol, order_id, status,
+                )
+
+            elif cancel_unfilled:
+                try:
+                    self._alpaca_client.cancel_order(order_id)
+                    self._trade_db.cancel_pending_position(symbol)
+                    self._trade_db.update_order_status(order_id, "CANCELLED")
+                    logger.info(
+                        "ENTRY CANCELLED (EOD): %s — pivot never triggered today",
+                        symbol,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to cancel unfilled entry for %s: %s", symbol, exc
+                    )
+
     def _reconcile_positions(self):
         """Sync trade_db positions with Alpaca's actual positions.
 
@@ -784,8 +893,8 @@ class DailyWorkflow:
         Stop price selection (best available):
         1. Today's Low of Day (LOD) from market data — this is what the
            PositionManager would have set if the update hadn't failed.
-        2. DB ``entry_orl`` — the last known stop (may still be original
-           entry stop if no update ever succeeded).
+        2. DB ``current_stop`` (or legacy ``entry_orl``) — the last
+           known stop if no update ever succeeded.
         3. Skip if neither is available.
         """
         if not self._alpaca_client or not self._trade_db:
@@ -812,9 +921,12 @@ class DailyWorkflow:
 
                 # Determine the best stop price:
                 # Prefer today's LOD (what position manager intended)
-                # over the stale DB entry_orl (which may be original entry stop).
+                # over the last tracked DB stop.
                 db_pos = self._trade_db.get_position(symbol)
-                db_stop = db_pos.get("entry_orl", 0) if db_pos else 0
+                db_stop = (
+                    (db_pos.get("current_stop") or db_pos.get("entry_orl", 0))
+                    if db_pos else 0
+                )
 
                 # Fetch today's LOD from market data
                 lod = 0.0
@@ -837,7 +949,7 @@ class DailyWorkflow:
                     stop_source = "LOD"
                 elif db_stop > 0:
                     stop_price = db_stop
-                    stop_source = "DB entry_orl"
+                    stop_source = "DB stop"
                 else:
                     logger.warning(
                         "SAFETY NET: %s has no stop and no DB stop price — SKIPPED",

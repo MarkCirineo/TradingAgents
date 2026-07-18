@@ -50,9 +50,11 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS positions (
     symbol TEXT PRIMARY KEY,
     entry_date TEXT NOT NULL,
-    entry_price REAL NOT NULL,
-    entry_orl REAL NOT NULL,          -- Opening Range Low (initial stop)
+    entry_price REAL NOT NULL,        -- Actual fill price once confirmed (signal price while PENDING)
+    entry_orl REAL NOT NULL,          -- IMMUTABLE initial stop (consolidation pivot floor;
+                                      -- "ORL" is a legacy name from the old opening-range entry)
     entry_lod REAL,                   -- Day 1 LOD (set after Day 1 close)
+    current_stop REAL,                -- Current protective stop (updated by stop raises)
     current_qty REAL NOT NULL,
     original_qty REAL NOT NULL,
     day_count INTEGER DEFAULT 1,      -- Trading days held
@@ -60,10 +62,11 @@ CREATE TABLE IF NOT EXISTS positions (
     trim_date TEXT,
     breakeven_stop_active INTEGER DEFAULT 0,
     trailing_stop_active INTEGER DEFAULT 0,
+    entry_order_id TEXT,              -- Alpaca entry order ID (for fill reconciliation)
     stop_order_id TEXT,               -- Current Alpaca stop order ID
-    status TEXT DEFAULT 'OPEN',       -- OPEN / CLOSED
+    status TEXT DEFAULT 'PENDING',    -- PENDING (order submitted) / OPEN (filled) / CLOSED / CANCELLED (never filled)
     closed_at TEXT,
-    close_reason TEXT,                -- LOD_STOP / DAY1_RED / TRIM / TRAIL_10SMA / MANUAL / PARABOLIC
+    close_reason TEXT,                -- LOD_STOP / DAY1_RED / TRIM / TRAIL_10SMA / MANUAL / PARABOLIC / ENTRY_NEVER_FILLED
     pipeline_mode TEXT DEFAULT 'full'  -- 'full' (LLM) or 'quant' for A/B tracking
 );
 
@@ -124,6 +127,8 @@ class TradeDB:
         migrations = [
             ("orders", "pipeline_mode", "TEXT DEFAULT 'full'"),
             ("positions", "pipeline_mode", "TEXT DEFAULT 'full'"),
+            ("positions", "current_stop", "REAL"),
+            ("positions", "entry_order_id", "TEXT"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -131,6 +136,13 @@ class TradeDB:
                 logger.info("Migration: added %s.%s", table, column)
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+        # Backfill current_stop for legacy rows: entry_orl used to be
+        # overwritten by every stop update, so it holds the last stop.
+        conn.execute(
+            "UPDATE positions SET current_stop = entry_orl "
+            "WHERE current_stop IS NULL"
+        )
 
     @contextmanager
     def _connect(self):
@@ -251,38 +263,116 @@ class TradeDB:
         entry_orl: float,
         qty: float,
         stop_order_id: Optional[str] = None,
+        entry_order_id: Optional[str] = None,
+        pipeline_mode: str = "full",
+        status: str = "PENDING",
     ):
-        """Record a new open position."""
+        """Record a newly submitted entry.
+
+        Positions start as ``PENDING`` (order submitted, not yet filled).
+        ``mark_position_filled`` promotes them to ``OPEN`` with the actual
+        fill price once Alpaca confirms;  ``cancel_pending_position``
+        retires entries that never triggered.  *entry_price* is the
+        intended signal price until the fill is confirmed.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO positions
-                    (symbol, entry_date, entry_price, entry_orl, current_qty,
-                     original_qty, stop_order_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (symbol, entry_date, entry_price, entry_orl, current_stop,
+                     current_qty, original_qty, stop_order_id, entry_order_id,
+                     pipeline_mode, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     entry_date = excluded.entry_date,
                     entry_price = excluded.entry_price,
                     entry_orl = excluded.entry_orl,
+                    current_stop = excluded.current_stop,
+                    entry_order_id = excluded.entry_order_id,
+                    pipeline_mode = excluded.pipeline_mode,
+                    status = excluded.status,
                     current_qty = excluded.current_qty,
                     original_qty = excluded.original_qty,
                     stop_order_id = COALESCE(excluded.stop_order_id, stop_order_id),
-                    status = 'OPEN',
                     day_count = 1,
                     trimmed = 0,
+                    closed_at = NULL,
+                    close_reason = NULL,
                     breakeven_stop_active = 0,
                     trailing_stop_active = 0
                 """,
-                (symbol, entry_date, entry_price, entry_orl, qty, qty, stop_order_id),
+                (
+                    symbol, entry_date, entry_price, entry_orl, entry_orl,
+                    qty, qty, stop_order_id, entry_order_id, pipeline_mode,
+                    status,
+                ),
             )
 
-    def get_open_positions(self) -> list[dict]:
-        """Return all positions with status ``OPEN``."""
+    def get_open_positions(self, include_pending: bool = False) -> list[dict]:
+        """Return positions we hold (status ``OPEN``).
+
+        Parameters
+        ----------
+        include_pending : bool
+            When True, also include ``PENDING`` positions (entry order
+            submitted but not yet filled).  Use this for slot-counting
+            (guardrails, already-held checks) so unfilled buy-stops
+            still reserve a position slot.  Position management (exits,
+            trims, day counts) must NOT include pending entries.
+        """
+        query = "SELECT * FROM positions WHERE status = 'OPEN'"
+        if include_pending:
+            query = "SELECT * FROM positions WHERE status IN ('OPEN', 'PENDING')"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_pending_positions(self) -> list[dict]:
+        """Return positions whose entry order has not been confirmed filled."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM positions WHERE status = 'OPEN'"
+                "SELECT * FROM positions WHERE status = 'PENDING'"
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def mark_position_filled(
+        self,
+        symbol: str,
+        fill_price: Optional[float] = None,
+        fill_date: Optional[str] = None,
+        fill_qty: Optional[float] = None,
+    ):
+        """Promote a PENDING position to OPEN with actual fill details.
+
+        Called by fill reconciliation once Alpaca confirms the entry
+        order filled.  Replaces the intended signal price with the real
+        average fill price.
+        """
+        updates: dict = {"status": "OPEN"}
+        if fill_price:
+            updates["entry_price"] = fill_price
+        if fill_date:
+            updates["entry_date"] = fill_date
+        if fill_qty:
+            updates["current_qty"] = fill_qty
+            updates["original_qty"] = fill_qty
+        self.update_position(symbol, **updates)
+
+    def cancel_pending_position(self, symbol: str, reason: str = "ENTRY_NEVER_FILLED"):
+        """Retire a PENDING position whose entry order never filled.
+
+        Uses status ``CANCELLED`` (not ``CLOSED``) so these rows are
+        excluded from trade history / P&L queries.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE positions
+                SET status = 'CANCELLED', closed_at = ?, close_reason = ?
+                WHERE symbol = ? AND status = 'PENDING'
+                """,
+                (datetime.now().isoformat(), reason, symbol),
+            )
 
     def get_position(self, symbol: str) -> Optional[dict]:
         """Return the position record for *symbol*, or ``None``."""
@@ -518,7 +608,10 @@ class TradeDB:
         )
 
     def update_stop(self, symbol: str, new_stop: float, stop_type: str = ""):
-        """Update the tracked stop price for a position.
+        """Update the tracked CURRENT stop price for a position.
+
+        ``entry_orl`` (the immutable initial stop) is deliberately left
+        untouched — only ``current_stop`` moves as stops are raised.
 
         Parameters
         ----------
@@ -526,7 +619,7 @@ class TradeDB:
             ``"breakeven"``, ``"trailing"``, or ``"lod"`` — sets the
             corresponding flag column for audit.
         """
-        updates = {"entry_orl": new_stop}
+        updates = {"current_stop": new_stop}
         if stop_type == "breakeven":
             updates["breakeven_stop_active"] = 1
             updates["trailing_stop_active"] = 0
@@ -534,4 +627,24 @@ class TradeDB:
             updates["breakeven_stop_active"] = 0
             updates["trailing_stop_active"] = 1
         self.update_position(symbol, **updates)
+
+    def update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        filled_price: Optional[float] = None,
+    ):
+        """Sync an order row's status from Alpaca (fill reconciliation)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE orders
+                SET status = ?,
+                    filled_price = COALESCE(?, filled_price),
+                    filled_at = CASE WHEN ? = 'FILLED' AND filled_at IS NULL
+                                     THEN datetime('now') ELSE filled_at END
+                WHERE id = ?
+                """,
+                (status, filled_price, status, order_id),
+            )
 
