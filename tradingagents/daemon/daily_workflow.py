@@ -1178,41 +1178,83 @@ class DailyWorkflow:
             logger.warning("Fallback entry/stop failed for %s: %s", symbol, exc)
             return (0.0, 0.0)
 
+    def _cancel_open_orders(self, symbol):
+        """Cancel all open orders for a symbol.
+
+        Bracket children (stop-loss / take-profit) lock the shares, so they
+        must be cancelled before the position can be closed or trimmed.
+        """
+        try:
+            open_orders = self._alpaca_client.get_orders(symbols=[symbol])
+        except Exception as exc:
+            logger.warning("Could not fetch/cancel orders for %s: %s", symbol, exc)
+            return
+        for order in open_orders:
+            try:
+                self._alpaca_client.cancel_order(str(order.id))
+                logger.info(
+                    "Cancelled order %s (%s) for %s before exit",
+                    order.id, getattr(order, "type", "?"), symbol,
+                )
+            except Exception as cancel_exc:
+                logger.warning("Could not cancel order %s: %s", order.id, cancel_exc)
+
+    def _replace_stop_after_trim(self, symbol, qty):
+        """Re-place a GTC stop on the shares left after a partial trim.
+
+        Trimming cancels the bracket stop to free the shares, so the remainder
+        would otherwise sit unprotected until the post_market safety net.  Use
+        the position's known stop level (DB ``current_stop``, else the initial
+        ORL).  ``qty`` is the computed remainder, so the stop never covers more
+        shares than are held regardless of fill-settlement timing.  On any
+        failure, ``_ensure_stops`` in post_market remains the backstop.
+        """
+        if qty < 1 or not self._trade_db:
+            return
+        db_pos = self._trade_db.get_position(symbol)
+        stop_price = (
+            (db_pos.get("current_stop") or db_pos.get("entry_orl", 0))
+            if db_pos else 0
+        )
+        if not stop_price or stop_price <= 0:
+            logger.warning(
+                "Post-trim stop for %s skipped — no known stop price; "
+                "post_market safety net will cover", symbol,
+            )
+            return
+        from alpaca.trading.enums import OrderSide
+        try:
+            order = self._alpaca_client.submit_stop_order(
+                symbol=symbol, qty=qty, side=OrderSide.SELL,
+                stop_price=round(stop_price, 2),
+            )
+            logger.info(
+                "Re-placed GTC stop for %s remainder — %d sh @ $%.2f after trim",
+                symbol, int(qty), round(stop_price, 2),
+            )
+            self._trade_db.update_position(
+                symbol, stop_order_id=str(getattr(order, "id", "")),
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to re-place stop after trim for %s: %s — "
+                "post_market safety net will cover", symbol, exc,
+            )
+
     def _execute_exit(self, action):
         """Execute an exit (full or partial) via Alpaca.
 
-        Before closing, cancels any open orders for the symbol (bracket
-        child legs lock the shares and must be removed first).
+        Full exit: cancel the bracket children (they lock the shares) and
+        close.  Partial trim: compute the whole-share sell quantity FIRST — if
+        it rounds to 0 (e.g. a 1-share position) do nothing and leave the
+        protective stop in place; otherwise cancel, sell, and immediately
+        re-place a stop on the remaining shares.
         """
         import time
 
         try:
-            # Cancel any open orders for this symbol first.
-            # Bracket order children (stop-loss, take-profit) lock the
-            # shares — we must cancel them before we can close.
-            try:
-                open_orders = self._alpaca_client.get_orders(
-                    symbols=[action.symbol],
-                )
-                for order in open_orders:
-                    try:
-                        self._alpaca_client.cancel_order(str(order.id))
-                        logger.info(
-                            "Cancelled order %s (%s) for %s before exit",
-                            order.id, getattr(order, "type", "?"), action.symbol,
-                        )
-                    except Exception as cancel_exc:
-                        logger.warning(
-                            "Could not cancel order %s: %s",
-                            order.id, cancel_exc,
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "Could not fetch/cancel orders for %s: %s",
-                    action.symbol, exc,
-                )
-
             if action.action == "exit_full":
+                self._cancel_open_orders(action.symbol)
                 # Retry with backoff — Alpaca processes bracket child
                 # cancellations asynchronously, shares may still be locked.
                 max_attempts = 5
@@ -1241,23 +1283,40 @@ class DailyWorkflow:
                             raise  # re-raise to hit the outer except handler
 
             elif action.action == "exit_partial":
-                # Get current position to calculate shares to sell
-                time.sleep(1.0)  # brief pause after order cancellations
+                # Compute the whole-share sell qty from the LIVE position
+                # BEFORE touching any orders: if it rounds to 0 we must not
+                # strip the protective stop for a sale that won't happen.
                 pos = self._alpaca_client.get_position(action.symbol)
-                if pos:
-                    import math
-                    current_qty = float(pos.qty)
-                    sell_qty = math.floor(current_qty * action.exit_pct)
-                    if sell_qty > 0:
-                        self._alpaca_client.close_position(action.symbol, qty=sell_qty)
-                        logger.info(
-                            "EXIT PARTIAL: %s — %d/%d shares — %s",
-                            action.symbol, sell_qty, int(current_qty), action.reason,
-                        )
-                        notify("exit", symbol=action.symbol, action="exit_partial", reason=action.reason)
-                        # Mark as trimmed in DB
-                        if self._trade_db:
-                            self._trade_db.mark_trimmed(action.symbol)
+                if not pos:
+                    logger.info(
+                        "EXIT PARTIAL: %s — no live position, nothing to trim",
+                        action.symbol,
+                    )
+                    return
+                import math
+                current_qty = float(pos.qty)
+                sell_qty = math.floor(current_qty * action.exit_pct)
+                if sell_qty < 1:
+                    logger.info(
+                        "Trim skipped for %s — %d share(s) too few to sell "
+                        "%.0f%%; holding full position, stop left intact",
+                        action.symbol, int(current_qty), action.exit_pct * 100,
+                    )
+                    return  # protective stop NOT cancelled
+
+                self._cancel_open_orders(action.symbol)
+                time.sleep(1.0)  # let cancellations settle before selling
+                self._alpaca_client.close_position(action.symbol, qty=sell_qty)
+                remaining = int(current_qty) - sell_qty
+                logger.info(
+                    "EXIT PARTIAL: %s — %d/%d shares — %s",
+                    action.symbol, sell_qty, int(current_qty), action.reason,
+                )
+                notify("exit", symbol=action.symbol, action="exit_partial", reason=action.reason)
+                if self._trade_db:
+                    self._trade_db.mark_trimmed(action.symbol)
+                # Re-protect the remainder now; don't wait for post_market.
+                self._replace_stop_after_trim(action.symbol, remaining)
 
             if self._ctx:
                 self._ctx.exits_executed.append({

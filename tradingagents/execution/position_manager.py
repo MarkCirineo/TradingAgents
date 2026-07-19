@@ -20,6 +20,7 @@ Stop management:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -171,11 +172,24 @@ class PositionManager:
         partial_day = self._rules["partial_profit_day"]
         if day_count >= partial_day and not trimmed:
             if latest_close > entry_price:  # only trim if profitable
-                return PositionAction(
-                    symbol=symbol,
-                    action="exit_partial",
-                    reason=f"Day {day_count} trim: selling {self._rules['partial_profit_pct']:.0%}",
-                    exit_pct=self._rules["partial_profit_pct"],
+                partial_pct = self._rules["partial_profit_pct"]
+                current_qty = pos.get("current_qty", 0)
+                # A whole-share trim needs at least one share to sell.  On a
+                # small account a 1-share winner can't be trimmed (floor(1 ×
+                # 50%) = 0), so emitting the trim would be a no-op.  Fall
+                # through to the trailing-stop rules instead, keeping the full
+                # position and its stop.  Do NOT mark it trimmed -- it isn't.
+                if math.floor(current_qty * partial_pct) >= 1:
+                    return PositionAction(
+                        symbol=symbol,
+                        action="exit_partial",
+                        reason=f"Day {day_count} trim: selling {partial_pct:.0%}",
+                        exit_pct=partial_pct,
+                    )
+                logger.info(
+                    "PositionManager: %s day %d winner too small to trim "
+                    "(%s shares) — holding full position",
+                    symbol, day_count, current_qty,
                 )
 
         # Rule 4: Trailing 10 SMA exit
