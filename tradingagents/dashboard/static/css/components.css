@@ -471,6 +471,33 @@
     border-color: var(--primary);
 }
 
+.chart-controls__label {
+    align-self: center;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    margin-left: var(--space-sm);
+}
+
+/* ─── Equity Curve Benchmark Summary ─────────────────────────── */
+.equity-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    align-items: center;
+    min-height: 20px;
+    margin-bottom: var(--space-sm);
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+}
+
+.equity-summary__item b {
+    font-weight: 600;
+}
+
+.equity-summary__delta {
+    font-weight: 600;
+}
+
 /* ─── Stat Row (key-value pairs inside cards) ─────────────── */
 .stat-row {
     display: flex;

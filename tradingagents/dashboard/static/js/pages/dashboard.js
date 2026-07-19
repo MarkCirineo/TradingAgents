@@ -15,6 +15,9 @@ const DashboardPage = {
     /** Current chart date range in days. */
     _chartDays: 30,
 
+    /** Current benchmark overlay: 'none' | 'spy' | 'blend' (default raw SPY). */
+    _benchmark: 'spy',
+
     /**
      * Render the dashboard page into the given container.
      * @param {HTMLElement} container
@@ -67,14 +70,14 @@ const DashboardPage = {
         const [portfolio, positionsData, equityData, screeningData, regime] = await Promise.all([
             API.getPortfolio(),
             API.getPositions(),
-            API.getEquityCurve(this._chartDays),
+            API.getEquityCurve(this._chartDays, this._benchmark),
             API.getScreeningLatest(),
             API.getRegime(),
         ]);
 
         if (portfolio) this._updatePortfolioCards(portfolio);
         if (positionsData) this._updatePositionsTable(positionsData.positions || []);
-        if (equityData) this._updateEquityCurve(equityData.data || []);
+        if (equityData) this._renderEquityResponse(equityData);
         if (screeningData) {
             this._updateActivity(screeningData);
             this._updateScreeningLog(screeningData.screening || []);
@@ -315,7 +318,7 @@ const DashboardPage = {
         const card = Components.card({ title: 'Equity Curve', icon: '\u{1F4C8}', id: 'card-equity' });
         card.classList.add('bento-grid__full');
 
-        // Chart controls
+        // Controls row: date ranges (left) + benchmark selector (right)
         const controls = document.createElement('div');
         controls.className = 'chart-controls';
         controls.id = 'equity-controls';
@@ -326,21 +329,55 @@ const DashboardPage = {
             { label: '90D', days: 90 },
             { label: 'All', days: 9999 },
         ];
-
         ranges.forEach((range) => {
             const btn = document.createElement('button');
             btn.className = `chart-controls__btn${range.days === this._chartDays ? ' active' : ''}`;
             btn.textContent = range.label;
-            btn.addEventListener('click', async () => {
-                controls.querySelectorAll('.chart-controls__btn').forEach(b => b.classList.remove('active'));
+            btn.dataset.range = String(range.days);
+            btn.addEventListener('click', () => {
+                controls.querySelectorAll('[data-range]').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 this._chartDays = range.days;
-                const data = await API.getEquityCurve(range.days);
-                if (data) this._updateEquityCurve(data.data || []);
+                this._loadEquity();
+            });
+            controls.appendChild(btn);
+        });
+
+        // Spacer pushes the benchmark selector to the right edge
+        const spacer = document.createElement('div');
+        spacer.style.flex = '1';
+        controls.appendChild(spacer);
+
+        const benchLabel = document.createElement('span');
+        benchLabel.className = 'chart-controls__label';
+        benchLabel.textContent = 'vs';
+        controls.appendChild(benchLabel);
+
+        const benchmarks = [
+            { label: 'Off', mode: 'none' },
+            { label: 'SPY', mode: 'spy' },
+            { label: '60/40', mode: 'blend' },
+        ];
+        benchmarks.forEach((b) => {
+            const btn = document.createElement('button');
+            btn.className = `chart-controls__btn${b.mode === this._benchmark ? ' active' : ''}`;
+            btn.textContent = b.label;
+            btn.dataset.bench = b.mode;
+            btn.addEventListener('click', () => {
+                controls.querySelectorAll('[data-bench]').forEach(x => x.classList.remove('active'));
+                btn.classList.add('active');
+                this._benchmark = b.mode;
+                this._loadEquity();
             });
             controls.appendChild(btn);
         });
         card.appendChild(controls);
+
+        // Benchmark summary line (You vs benchmark, with the delta)
+        const summary = document.createElement('div');
+        summary.className = 'equity-summary';
+        summary.id = 'equity-summary';
+        card.appendChild(summary);
 
         // Chart container
         const chartContainer = document.createElement('div');
@@ -356,6 +393,26 @@ const DashboardPage = {
         });
     },
 
+    /** Fetch the equity curve (+ benchmark) for the current range and render. */
+    async _loadEquity() {
+        const resp = await API.getEquityCurve(this._chartDays, this._benchmark);
+        if (resp) this._renderEquityResponse(resp);
+    },
+
+    /** Render an equity-curve API response: account line + benchmark overlay. */
+    _renderEquityResponse(resp) {
+        this._updateEquityCurve(resp.data || []);
+
+        if (this._benchmark !== 'none' && resp.benchmark && resp.benchmark.length) {
+            const color = this._benchmark === 'blend' ? '#a78bfa' : '#f59e0b';
+            Charts.setBenchmark('equity', resp.benchmark, { color });
+            this._updateBenchmarkSummary(resp.summary, this._benchmark);
+        } else {
+            Charts.clearBenchmark('equity');
+            this._updateBenchmarkSummary(null);
+        }
+    },
+
     _updateEquityCurve(data) {
         if (!data || data.length === 0) return;
         const container = document.getElementById('equity-chart');
@@ -367,6 +424,24 @@ const DashboardPage = {
         } else {
             Charts.updateData('equity', data);
         }
+    },
+
+    /** Render the "You +X% · SPY +Y% · beating by Z%" line under the controls. */
+    _updateBenchmarkSummary(summary, mode) {
+        const el = document.getElementById('equity-summary');
+        if (!el) return;
+        if (!summary) { el.innerHTML = ''; return; }
+
+        const name = mode === 'blend' ? '60/40' : 'SPY';
+        const pct = (v) => (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%';
+        const cls = (v) => (v >= 0 ? 'text-success' : 'text-danger');
+        const d = summary.delta;
+        const verdict = d >= 0 ? 'beating' : 'trailing';
+
+        el.innerHTML =
+            `<span class="equity-summary__item">You <b class="${cls(summary.your_return)}">${pct(summary.your_return)}</b></span>` +
+            `<span class="equity-summary__item">${name} <b class="${cls(summary.benchmark_return)}">${pct(summary.benchmark_return)}</b></span>` +
+            `<span class="equity-summary__delta ${cls(d)}">${verdict} the market by ${(Math.abs(d) * 100).toFixed(1)}%</span>`;
     },
 
     // ══════════════════════════════════════════════════════════

@@ -53,6 +53,21 @@ def get_alpaca_client():
     return _state["alpaca_client"]
 
 
+def get_data_client():
+    """Return the shared AlpacaDataClient instance (lazy init).
+
+    Used for benchmark (SPY) bars on the equity curve.
+    """
+    if "data_client" not in _state:
+        try:
+            from tradingagents.execution.alpaca_data import AlpacaDataClient
+            _state["data_client"] = AlpacaDataClient()
+        except Exception as exc:
+            logger.warning("AlpacaDataClient not available: %s", exc)
+            _state["data_client"] = None
+    return _state["data_client"]
+
+
 def get_config():
     """Return the current daemon configuration."""
     if "config" not in _state:

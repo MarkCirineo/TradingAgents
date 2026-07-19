@@ -83,9 +83,10 @@ const API = {
         return this._fetch(`/api/snapshots?days=${days}`);
     },
 
-    /** Get equity curve data for charting. */
-    async getEquityCurve(days = 90) {
-        return this._fetch(`/api/equity-curve?days=${days}`);
+    /** Get equity curve data for charting, optionally with a market
+     * benchmark overlay ('none' | 'spy' | 'blend'). */
+    async getEquityCurve(days = 90, benchmark = 'none') {
+        return this._fetch(`/api/equity-curve?days=${days}&benchmark=${benchmark}`);
     },
 
     // ── Screening ─────────────────────────────────────────────

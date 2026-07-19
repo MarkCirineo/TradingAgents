@@ -124,6 +124,48 @@ const Charts = {
     },
 
     /**
+     * Overlay a benchmark line series on an existing chart (e.g. SPY).
+     * Creates the series on first call, then just updates its data.
+     * @param {string} id - Chart instance ID
+     * @param {Array<{time: string, value: number}>} data
+     * @param {object} opts
+     * @param {string} opts.color - Line colour
+     */
+    setBenchmark(id, data, opts = {}) {
+        const chart = this._instances[id];
+        if (!chart) return;
+        if (!chart._benchmarkSeries) {
+            chart._benchmarkSeries = chart.addLineSeries({
+                color: opts.color || '#f59e0b',
+                lineWidth: 2,
+                lineStyle: 2, // dashed — visually distinct from the equity area
+                priceLineVisible: false,
+                lastValueVisible: true,
+                crosshairMarkerVisible: true,
+                priceFormat: {
+                    type: 'custom',
+                    formatter: (price) => '$' + price.toLocaleString('en-US', { maximumFractionDigits: 0 }),
+                },
+            });
+        } else if (opts.color) {
+            chart._benchmarkSeries.applyOptions({ color: opts.color });
+        }
+        chart._benchmarkSeries.setData(data || []);
+    },
+
+    /**
+     * Remove the benchmark overlay from a chart, if present.
+     * @param {string} id - Chart instance ID
+     */
+    clearBenchmark(id) {
+        const chart = this._instances[id];
+        if (chart && chart._benchmarkSeries) {
+            chart.removeSeries(chart._benchmarkSeries);
+            chart._benchmarkSeries = null;
+        }
+    },
+
+    /**
      * Cleanup a chart instance.
      * @param {string} id
      */
