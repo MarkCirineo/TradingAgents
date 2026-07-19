@@ -225,3 +225,39 @@ class TestFilterCandidatesContract:
 
         assert [r.symbol for r in results] == ["GOOD"]
         assert results[0].passed
+
+
+class TestShareSizingGate:
+    """The exact whole-share gate (account-size aware) added to the pre-filter.
+
+    The textbook setup is a ~$60 stock; whether it survives depends on whether
+    one whole share can be risk-sized at the given equity.
+    """
+
+    def _run(self, portfolio_value):
+        client = StubDataClient({"AAA": _passing_bars(), "SPY": _flat_spy_bars()})
+        pf = PreFilter(data_client=client, portfolio_value=portfolio_value)
+        return pf.evaluate_all(["AAA"])[0]
+
+    def test_passes_with_ample_equity(self):
+        r = self._run(100_000)
+        assert r.passed, r.reject_reason
+        assert r.checks["share_sizing"] is True
+        assert r.checks["sized_shares"] >= 1
+
+    def test_rejected_when_below_one_share(self):
+        # A $200 account can't fit one share of a ~$60 stock inside the 10%
+        # position cap, let alone the risk budget -> sized to 0 -> dropped
+        # here rather than silently at entry.
+        r = self._run(200)
+        assert not r.passed
+        assert r.checks["share_sizing"] is False
+        assert r.checks["sized_shares"] == 0
+        assert "sizes to 0 shares" in r.reject_reason
+
+    def test_gate_disabled_without_equity(self):
+        # portfolio_value=None -> gate is a no-op, matching pre-change behaviour.
+        r = self._run(None)
+        assert r.passed, r.reject_reason
+        assert r.checks["share_sizing"] is True
+        assert "sized_shares" not in r.checks

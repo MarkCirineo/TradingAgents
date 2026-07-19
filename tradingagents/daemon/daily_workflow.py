@@ -185,19 +185,30 @@ class DailyWorkflow:
         # 2. Screen tickers
         from tradingagents.screening.screener import HybridScreener
 
+        portfolio_value = self._current_equity()
+        screening_config = self._screening_config_with_dynamic_cap(portfolio_value)
         screener = HybridScreener(
             data_client=self._data_client,
-            config=self._config,
+            config=screening_config,
         )
         candidates = screener.scan()
 
         # 3. Pre-filter
         from tradingagents.screening.pre_filter import PreFilter
+        from tradingagents.strategies.swing_playbook import get_sizing_params
 
+        # Size the pre-filter's share gate with the SAME risk the executor
+        # will use — VIX-regime-adjusted — so the gate can't desync from live
+        # sizing (mirrors Executor: regime["risk_pct"] or the static target).
+        effective_risk = self._ctx.regime.get(
+            "risk_pct", get_sizing_params(self._config)["target_risk_pct"]
+        )
         pf = PreFilter(
             data_client=self._data_client,
             trade_db=self._trade_db,
-            config=self._config,
+            config=screening_config,
+            portfolio_value=portfolio_value,
+            risk_pct=effective_risk,
         )
         symbols = [c.symbol for c in candidates]
         filtered = pf.filter_candidates(symbols)
@@ -251,6 +262,55 @@ class DailyWorkflow:
             logger.warning("Failed to log screening: %s", exc)
 
         return self._ctx
+
+    def _current_equity(self) -> Optional[float]:
+        """Live account equity, or None if the API call fails.
+
+        None disables the account-size sizing gates (coarse screen cap +
+        exact whole-share gate), falling back to the static price band.
+        """
+        try:
+            return self._alpaca_client.get_portfolio_value()
+        except Exception as exc:
+            logger.warning(
+                "Equity unavailable (%s) — account-size sizing gates off, "
+                "using static price band", exc,
+            )
+            return None
+
+    def _screening_config_with_dynamic_cap(
+        self, portfolio_value: Optional[float]
+    ) -> Dict[str, Any]:
+        """Config for the screeners, coarse max_price scaled to the position
+        ceiling at the given equity.
+
+        A stock above the position-size ceiling can't fit one whole share, so
+        this trims the universe scan to what's tradeable at all.  The exact,
+        per-candidate share gate then runs in the pre-filter (see
+        ``get_effective_max_price`` / ``calculate_shares``).  Returns
+        ``self._config`` unchanged when equity is unknown or the cap doesn't
+        bind.
+        """
+        from tradingagents.strategies.swing_playbook import get_effective_max_price
+
+        if not portfolio_value:
+            return self._config
+
+        effective = get_effective_max_price(self._config, portfolio_value)
+        static = self._config.get("swing_strategy", {}).get("max_price", 500.0)
+        if effective >= static:
+            return self._config
+
+        logger.info(
+            "Dynamic sizing: coarse screen cap $%.0f (position ceiling at "
+            "$%.0f equity, static $%.0f); exact whole-share gate in pre-filter",
+            effective, portfolio_value, static,
+        )
+        config = dict(self._config)
+        swing = dict(config.get("swing_strategy", {}))
+        swing["max_price"] = effective
+        config["swing_strategy"] = swing
+        return config
 
     # -- 8:05 AM: Analyze (LLM pipeline) ------------------------------------
 

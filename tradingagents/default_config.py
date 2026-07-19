@@ -119,7 +119,11 @@ DEFAULT_CONFIG = {
         "min_dollar_volume": 50_000_000,    # $50M avg daily dollar volume
         "min_adr_pct": 0.04,                # 4% average daily range
         "min_price": 5.0,                   # Minimum stock price
-        "max_price": 500.0,                 # Maximum stock price
+        "max_price": 500.0,                 # Maximum stock price (static strategy ceiling)
+        "dynamic_max_price": True,          # Small-account sizing gates: scale the coarse
+                                            # screen cap to the position-size ceiling, then
+                                            # apply an exact whole-share gate in the pre-filter
+                                            # (uses each candidate's real pivot-based stop)
         # Entry method
         "orh_window_minutes": 15,           # Opening range window (reserved for EP support)
         # Exit rules

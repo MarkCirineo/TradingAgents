@@ -29,7 +29,12 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from tradingagents.strategies.swing_playbook import get_screening_params
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.strategies.swing_playbook import (
+    calculate_shares,
+    get_screening_params,
+    get_sizing_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +80,28 @@ class PreFilter:
         data_client=None,
         trade_db=None,
         config: Optional[Dict[str, Any]] = None,
+        portfolio_value: Optional[float] = None,
+        risk_pct: Optional[float] = None,
     ):
         self._data_client = data_client
         self._trade_db = trade_db
         self._params = get_screening_params(config)
+        self._sizing = get_sizing_params(config)
+        # Account equity for the exact whole-share gate.  When known (and
+        # dynamic sizing is on), candidates whose real pivot-based stop would
+        # size to 0 shares are filtered here instead of silently dropping at
+        # entry.  When None, the gate is skipped (behaviour unchanged).
+        self._portfolio_value = portfolio_value
+        # Risk-per-trade to size with -- must match the executor's, which is
+        # VIX-regime-adjusted (calm bumps it above base, elevated cuts it).
+        # Using the base here would desync the gate from live sizing and could
+        # over-filter in a calm regime.  Falls back to the static target.
+        self._risk_pct = (
+            risk_pct if risk_pct is not None else self._sizing["target_risk_pct"]
+        )
+        self._dynamic_sizing = (config or DEFAULT_CONFIG).get(
+            "swing_strategy", {}
+        ).get("dynamic_max_price", True)
 
     @property
     def data_client(self):
@@ -483,9 +506,42 @@ class PreFilter:
             checks["tight_consolidation"] = False
             reject_reasons.append(f"consolidation check error: {exc}")
 
+        # 10. Whole-share sizing (account-size aware).
+        #     Predict EXACTLY what the executor will size via the shared
+        #     calculate_shares, using the pivot high as the entry trigger and
+        #     the pivot low as the stop.  Unlike a price cap this keeps an
+        #     expensive stock whose tight stop still admits a whole share, and
+        #     drops a cheaper one whose wide stop does not.  Skipped when
+        #     equity is unknown or dynamic sizing is off (gate passes).
+        if (
+            self._dynamic_sizing
+            and self._portfolio_value
+            and checks.get("tight_consolidation")
+        ):
+            ph = checks.get("pivot_high")
+            pl = checks.get("pivot_low")
+            sized = calculate_shares(
+                ph, pl, self._portfolio_value,
+                self._risk_pct,
+                self._sizing["max_position_pct"],
+                self._sizing["max_risk_pct"],
+            )
+            checks["share_sizing"] = sized >= 1
+            checks["sized_shares"] = sized
+            if sized < 1:
+                reject_reasons.append(
+                    f"sizes to {sized} shares at ${self._portfolio_value:,.0f} "
+                    f"equity (stop ${ph - pl:.2f}/share vs "
+                    f"${self._portfolio_value * self._risk_pct:.2f} "
+                    f"risk budget)"
+                )
+        else:
+            checks["share_sizing"] = True  # gate disabled / equity unknown
+
         # Determine pass/fail
         # Must pass: not already held, dollar volume, ADR, price range,
-        # relative strength, prior uptrend, MA stacking, tight consolidation
+        # relative strength, prior uptrend, MA stacking, tight consolidation,
+        # and whole-share sizing at the current account size.
         required_checks = [
             checks.get("already_held", False),
             checks.get("dollar_volume", False),
@@ -495,6 +551,7 @@ class PreFilter:
             checks.get("prior_uptrend", False),
             checks.get("ma_stacking", False),
             checks.get("tight_consolidation", False),
+            checks.get("share_sizing", True),
         ]
         passed = all(required_checks)
 

@@ -17,6 +17,7 @@ document (Qullamaggie / peoplewish) into two outputs:
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -147,6 +148,71 @@ def get_screening_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, A
         "max_price": ss.get("max_price", 500.0),
         "orh_window_minutes": ss.get("orh_window_minutes", 15),
     }
+
+
+def calculate_shares(
+    entry_price: float,
+    stop_price: float,
+    portfolio_value: float,
+    target_risk_pct: float,
+    max_position_pct: float,
+    max_risk_pct: float,
+) -> int:
+    """Whole-share count for a risk-based entry (0 if it can't size to one).
+
+    Single source of truth for position sizing.  ``executor.py`` calls this
+    to size live orders, and the pre-filter calls it to predict -- exactly,
+    not via a price proxy -- whether a candidate will be tradeable at the
+    current account size.  The Qullamaggie risk model, in order:
+
+        shares = floor(target_risk_pct × equity / (entry − stop))
+        reduced to fit max_position_pct   (position-size cap)
+        reduced to fit max_risk_pct       (hard per-trade risk cap)
+
+    Returns 0 when the stop is non-positive-distance, equity/price is
+    non-positive, or any cap floors the count below one whole share.
+    """
+    risk_per_share = entry_price - stop_price
+    if risk_per_share <= 0 or portfolio_value <= 0 or entry_price <= 0:
+        return 0
+
+    shares = math.floor((portfolio_value * target_risk_pct) / risk_per_share)
+
+    # Cap at max position size.
+    max_position_value = portfolio_value * max_position_pct
+    if shares * entry_price > max_position_value:
+        shares = math.floor(max_position_value / entry_price)
+
+    # Cap at max risk per trade.
+    if shares * risk_per_share > portfolio_value * max_risk_pct:
+        shares = math.floor((portfolio_value * max_risk_pct) / risk_per_share)
+
+    return max(shares, 0)
+
+
+def get_effective_max_price(
+    config: Optional[Dict[str, Any]] = None,
+    portfolio_value: Optional[float] = None,
+) -> float:
+    """Coarse candidate price ceiling for the universe scan, scaled to equity.
+
+    A stock priced above ``max_position_pct`` of equity can't fit even one
+    whole share inside the position-size guardrail, so it's untradeable at
+    this account size *regardless* of stop distance -- screening it only
+    wastes data fetches.  This returns that hard ceiling (the loosest cap
+    that never drops a tradeable name); the pre-filter then applies the
+    exact, pivot-aware share-count gate within it (see ``calculate_shares``).
+
+    Falls back to the static ``max_price`` when equity is unknown or
+    ``dynamic_max_price`` is off.
+    """
+    cfg = config or DEFAULT_CONFIG
+    ss = cfg.get("swing_strategy", {})
+    static_cap = ss.get("max_price", 500.0)
+    if not ss.get("dynamic_max_price", True) or not portfolio_value:
+        return static_cap
+    pos_pct = cfg.get("guardrails", {}).get("max_position_pct", 0.10)
+    return max(min(static_cap, portfolio_value * pos_pct), ss.get("min_price", 5.0))
 
 
 # ---------------------------------------------------------------------------

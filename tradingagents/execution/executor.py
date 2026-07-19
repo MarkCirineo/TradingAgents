@@ -18,7 +18,6 @@ All math is deterministic — no LLM involvement.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -133,6 +132,8 @@ class Executor:
         dict
             ``shares``, ``position_value``, ``risk_amount``, ``risk_pct_actual``.
         """
+        from tradingagents.strategies.swing_playbook import calculate_shares
+
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return {
@@ -143,10 +144,18 @@ class Executor:
                 "error": "stop_price must be below entry_price",
             }
 
-        # Risk-based sizing
-        max_risk_dollars = portfolio_value * self._risk_pct
-        shares = math.floor(max_risk_dollars / risk_per_share)
-
+        # Delegate the risk model to the shared sizer so screening (pre_filter)
+        # can predict this result exactly.  A 0 means some cap floored the count
+        # below one share -- risk too small, price above the position cap, or
+        # both -- so we skip rather than submit a 0-quantity order.
+        shares = calculate_shares(
+            entry_price,
+            stop_price,
+            portfolio_value,
+            self._risk_pct,
+            self._max_position_pct,
+            self._max_risk_pct,
+        )
         if shares <= 0:
             return {
                 "shares": 0,
@@ -158,20 +167,6 @@ class Executor:
 
         position_value = shares * entry_price
         risk_amount = shares * risk_per_share
-
-        # Cap at max position size
-        max_position_value = portfolio_value * self._max_position_pct
-        if position_value > max_position_value:
-            shares = math.floor(max_position_value / entry_price)
-            position_value = shares * entry_price
-            risk_amount = shares * risk_per_share
-
-        # Cap risk at max_risk_pct
-        if risk_amount > portfolio_value * self._max_risk_pct:
-            shares = math.floor((portfolio_value * self._max_risk_pct) / risk_per_share)
-            position_value = shares * entry_price
-            risk_amount = shares * risk_per_share
-
         risk_pct_actual = risk_amount / portfolio_value if portfolio_value > 0 else 0
 
         return {
