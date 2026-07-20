@@ -17,9 +17,35 @@ router = APIRouter()
 
 
 def _get_service_name() -> str:
-    """Determine the systemd service name based on pipeline mode."""
+    """Resolve this instance's daemon systemd unit name.
+
+    Order of preference (so two same-pipeline instances don't collide):
+
+    1. ``DAEMON_SERVICE``  — the exact unit name, set per systemd instance.
+    2. ``INSTANCE_LABEL``  — ``trading-<label>-daemon`` (matches the label
+       already used for notifications).
+    3. ``PIPELINE_MODE``   — legacy ``trading-<mode>-daemon`` (the old
+       quant-vs-full A/B convention).
+    """
+    explicit = os.getenv("DAEMON_SERVICE")
+    if explicit:
+        return explicit
+    label = os.getenv("INSTANCE_LABEL")
+    if label:
+        return f"trading-{label.lower()}-daemon"
     mode = os.getenv("PIPELINE_MODE", "full")
     return f"trading-{mode}-daemon"
+
+
+def _get_dashboard_service(daemon_svc: str) -> str:
+    """Resolve this instance's dashboard systemd unit name.
+
+    ``DASHBOARD_SERVICE`` overrides; otherwise swap ``-daemon`` for
+    ``-dashboard`` on the daemon unit name.
+    """
+    return os.getenv("DASHBOARD_SERVICE") or daemon_svc.replace(
+        "-daemon", "-dashboard"
+    )
 
 
 @router.get("/logs")
@@ -47,7 +73,7 @@ async def get_logs(
         log_lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
 
         # Also grab dashboard logs
-        dashboard_svc = svc.replace("-daemon", "-dashboard")
+        dashboard_svc = _get_dashboard_service(svc)
         dash_result = subprocess.run(
             [
                 "journalctl",
