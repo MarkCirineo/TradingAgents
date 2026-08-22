@@ -257,8 +257,12 @@ class TestSlotSemantics:
     def test_guardrails_count_pending_toward_cap(self, db):
         from tradingagents.execution.guardrails import Guardrails
 
-        # Fill all six slots with PENDING entries (max_concurrent = 6)
-        for i in range(6):
+        from tradingagents.strategies.swing_playbook import get_sizing_params
+
+        # Fill every slot with PENDING entries -- an unfilled buy-stop must
+        # still reserve one, or N submitted stops could all trigger at once.
+        cap = get_sizing_params()["max_concurrent_positions"]
+        for i in range(cap):
             _submit_entry(db, symbol=f"SYM{i}", order_id=f"o{i}")
 
         gr = Guardrails(alpaca_client=None, trade_db=db)

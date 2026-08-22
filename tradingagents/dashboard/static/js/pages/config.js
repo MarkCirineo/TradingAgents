@@ -99,6 +99,8 @@ const ConfigPage = {
             { label: 'Max Daily Loss', value: this._pct(gr.max_daily_loss_pct) },
             { label: 'Max Risk/Trade', value: this._pct(gr.max_risk_per_trade_pct) },
             { label: 'Target Risk/Trade', value: this._pct(gr.target_risk_per_trade_pct) },
+            { label: 'Max Portfolio Heat', value: this._pct(gr.max_portfolio_heat_pct) },
+            { label: 'Max Sector Exposure', value: this._pct(gr.max_sector_exposure_pct) },
             { label: 'Max Concurrent Positions', value: gr.max_concurrent_positions || '\u2014' },
             { label: 'Min Dollar Volume', value: gr.min_dollar_volume ? `$${(gr.min_dollar_volume / 1e6).toFixed(0)}M` : '\u2014' },
         ];

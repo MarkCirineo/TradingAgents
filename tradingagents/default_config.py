@@ -83,7 +83,23 @@ DEFAULT_CONFIG = {
         "max_daily_loss_pct": 0.03,         # -3% daily drawdown halt
         "max_risk_per_trade_pct": 0.005,    # 0.5% risk per trade (hard cap)
         "target_risk_per_trade_pct": 0.0035,  # 0.35% risk per trade (default)
-        "max_concurrent_positions": 6,
+        # Position count is a backstop, not the primary control -- portfolio
+        # heat below binds first in normal conditions.  The source document
+        # targets ~10-20 concurrent positions ("aiming for ~10-20 positions
+        # when fully invested"); its lower counts are explicitly a human
+        # attention/psychology limit ("purely for psychological stability"),
+        # which does not apply to automated management.
+        "max_concurrent_positions": 10,
+        # Sum of open risk -- (entry - stop) x qty across untrimmed positions.
+        # This is the real concentration control: tight setups (small risk
+        # per trade) earn more slots, sloppy ones fewer.  Set to match
+        # max_daily_loss_pct so an all-stops-hit day lands on the halt
+        # rather than blowing through it.
+        "max_portfolio_heat_pct": 0.030,
+        # Max exposure to any single sector.  Momentum leaders cluster into
+        # themes, so N positions can be one bet.  Doc: "3x10% AI positions
+        # = 30% sector risk".
+        "max_sector_exposure_pct": 0.30,
         "min_dollar_volume": 50_000_000,    # $50M avg daily dollar volume
     },
     # Ticker screening

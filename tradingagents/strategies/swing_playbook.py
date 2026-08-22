@@ -123,7 +123,9 @@ def get_sizing_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
         "max_risk_pct": gr.get("max_risk_per_trade_pct", 0.005),
         "max_position_pct": gr.get("max_position_pct", 0.10),
         "max_exposure_pct": gr.get("max_exposure_pct", 0.60),
-        "max_concurrent_positions": gr.get("max_concurrent_positions", 6),
+        "max_concurrent_positions": gr.get("max_concurrent_positions", 10),
+        "max_portfolio_heat_pct": gr.get("max_portfolio_heat_pct", 0.030),
+        "max_sector_exposure_pct": gr.get("max_sector_exposure_pct", 0.30),
     }
 
 
@@ -229,12 +231,17 @@ def get_effective_max_price(
 # panic environments, so we pause NEW entries (existing positions are
 # still managed via trailing stops / trims).
 
+# ``max_positions`` is a backstop; ``max_heat_pct`` (sum of open risk) is
+# the binding control in normal conditions.  At the normal-regime risk of
+# 0.35%/trade, a 3.0% heat cap admits ~8-9 full-risk positions, so the
+# count only bites when many unusually tight setups stack up.
+# ``max_sector_pct`` is held at half of ``max_exposure_pct`` across regimes.
 _VIX_REGIMES = {
     # (vix_floor, vix_ceiling): {adjustments}
-    "calm":     {"vix_max": 15,  "risk_pct": 0.0040, "max_positions": 6, "max_exposure_pct": 0.60, "pause_entries": False, "label": "Calm"},
-    "normal":   {"vix_max": 20,  "risk_pct": 0.0035, "max_positions": 6, "max_exposure_pct": 0.60, "pause_entries": False, "label": "Normal"},
-    "elevated": {"vix_max": 30,  "risk_pct": 0.0025, "max_positions": 4, "max_exposure_pct": 0.40, "pause_entries": False, "label": "Elevated"},
-    "panic":    {"vix_max": 999, "risk_pct": 0.0,    "max_positions": 0, "max_exposure_pct": 0.0,  "pause_entries": True,  "label": "Panic"},
+    "calm":     {"vix_max": 15,  "risk_pct": 0.0040, "max_positions": 10, "max_exposure_pct": 0.60, "max_heat_pct": 0.035, "max_sector_pct": 0.30, "pause_entries": False, "label": "Calm"},
+    "normal":   {"vix_max": 20,  "risk_pct": 0.0035, "max_positions": 10, "max_exposure_pct": 0.60, "max_heat_pct": 0.030, "max_sector_pct": 0.30, "pause_entries": False, "label": "Normal"},
+    "elevated": {"vix_max": 30,  "risk_pct": 0.0025, "max_positions": 6,  "max_exposure_pct": 0.40, "max_heat_pct": 0.015, "max_sector_pct": 0.20, "pause_entries": False, "label": "Elevated"},
+    "panic":    {"vix_max": 999, "risk_pct": 0.0,    "max_positions": 0,  "max_exposure_pct": 0.0,  "max_heat_pct": 0.0,   "max_sector_pct": 0.0,  "pause_entries": True,  "label": "Panic"},
 }
 
 
@@ -253,8 +260,10 @@ def get_regime_adjustments(vix_level: float) -> Dict[str, Any]:
     -------
     dict
         ``risk_pct`` -- adjusted risk per trade (0 = no new entries).
-        ``max_positions`` -- adjusted max concurrent positions.
+        ``max_positions`` -- adjusted max concurrent positions (backstop).
         ``max_exposure_pct`` -- adjusted max portfolio exposure.
+        ``max_heat_pct`` -- adjusted max summed open risk (primary control).
+        ``max_sector_pct`` -- adjusted max exposure to a single sector.
         ``pause_entries`` -- if True, do not open any new positions.
         ``label`` -- human-readable regime name.
         ``vix_level`` -- the input VIX value (for logging).
