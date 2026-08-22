@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS positions (
     status TEXT DEFAULT 'PENDING',    -- PENDING (order submitted) / OPEN (filled) / CLOSED / CANCELLED (never filled)
     closed_at TEXT,
     close_reason TEXT,                -- LOD_STOP / DAY1_RED / TRIM / TRAIL_10SMA / MANUAL / PARABOLIC / ENTRY_NEVER_FILLED
-    pipeline_mode TEXT DEFAULT 'full'  -- 'full' (LLM) or 'quant' for A/B tracking
+    pipeline_mode TEXT DEFAULT 'full', -- 'full' (LLM) or 'quant' for A/B tracking
+    sector TEXT                        -- GICS-style sector, captured at entry for the concentration guardrail
 );
 
 -- Daily portfolio snapshots
@@ -129,6 +130,7 @@ class TradeDB:
             ("positions", "pipeline_mode", "TEXT DEFAULT 'full'"),
             ("positions", "current_stop", "REAL"),
             ("positions", "entry_order_id", "TEXT"),
+            ("positions", "sector", "TEXT"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -266,6 +268,7 @@ class TradeDB:
         entry_order_id: Optional[str] = None,
         pipeline_mode: str = "full",
         status: str = "PENDING",
+        sector: Optional[str] = None,
     ):
         """Record a newly submitted entry.
 
@@ -281,8 +284,8 @@ class TradeDB:
                 INSERT INTO positions
                     (symbol, entry_date, entry_price, entry_orl, current_stop,
                      current_qty, original_qty, stop_order_id, entry_order_id,
-                     pipeline_mode, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     pipeline_mode, status, sector)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     entry_date = excluded.entry_date,
                     entry_price = excluded.entry_price,
@@ -291,6 +294,7 @@ class TradeDB:
                     entry_order_id = excluded.entry_order_id,
                     pipeline_mode = excluded.pipeline_mode,
                     status = excluded.status,
+                    sector = COALESCE(excluded.sector, sector),
                     current_qty = excluded.current_qty,
                     original_qty = excluded.original_qty,
                     stop_order_id = COALESCE(excluded.stop_order_id, stop_order_id),
@@ -304,7 +308,7 @@ class TradeDB:
                 (
                     symbol, entry_date, entry_price, entry_orl, entry_orl,
                     qty, qty, stop_order_id, entry_order_id, pipeline_mode,
-                    status,
+                    status, sector,
                 ),
             )
 

@@ -246,7 +246,9 @@ class Executor:
         )
 
         # 3. Run guardrails
-        guardrail = self._guardrails.validate_entry(signal.symbol, position_value)
+        guardrail = self._guardrails.validate_entry(
+            signal.symbol, position_value, proposed_risk=risk_amount
+        )
         if not guardrail.approved:
             logger.warning(
                 "Executor BLOCKED %s: %s", signal.symbol, guardrail.reason
@@ -323,6 +325,10 @@ class Executor:
                     order_id=order_id,
                     status="submitted",
                 )
+                # Sector is resolved during the guardrail check, so this
+                # reads from its cache rather than re-hitting the network.
+                from tradingagents.dataflows.sector import get_sector
+
                 self._db.open_position(
                     symbol=signal.symbol,
                     entry_date=__import__("datetime").date.today().isoformat(),
@@ -333,6 +339,7 @@ class Executor:
                     entry_order_id=order_id,
                     pipeline_mode=self._pipeline_mode,
                     status="PENDING",
+                    sector=get_sector(signal.symbol),
                 )
             except Exception as exc:
                 logger.warning("DB record failed (order still live): %s", exc)

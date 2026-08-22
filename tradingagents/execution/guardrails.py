@@ -5,7 +5,10 @@ and the reason is logged to the trade database.  The executor calls
 ``validate_entry()`` before every new position.
 
 Checks:
-- Max concurrent positions (default 6, reduced in elevated VIX)
+- Max concurrent positions (default 10, reduced in elevated VIX) -- a
+  backstop; portfolio heat is the primary concentration control
+- Max portfolio heat (default 3.0% summed open risk, reduced in elevated VIX)
+- Max sector exposure (default 30%, reduced in elevated VIX)
 - Max portfolio exposure (default 60%, reduced in elevated VIX)
 - Max position size (10% of portfolio)
 - Daily drawdown halt (-3% daily P&L = stop all new entries)
@@ -79,16 +82,136 @@ class Guardrails:
         if regime:
             self._max_concurrent = regime.get("max_positions", sizing["max_concurrent_positions"])
             self._max_exposure_pct = regime.get("max_exposure_pct", sizing["max_exposure_pct"])
+            self._max_heat_pct = regime.get("max_heat_pct", sizing["max_portfolio_heat_pct"])
+            self._max_sector_pct = regime.get("max_sector_pct", sizing["max_sector_exposure_pct"])
             self._pause_entries = regime.get("pause_entries", False)
         else:
             self._max_concurrent = sizing["max_concurrent_positions"]
             self._max_exposure_pct = sizing["max_exposure_pct"]
+            self._max_heat_pct = sizing["max_portfolio_heat_pct"]
+            self._max_sector_pct = sizing["max_sector_exposure_pct"]
             self._pause_entries = False
+
+    @staticmethod
+    def _open_risk(open_positions: List[Dict[str, Any]]) -> float:
+        """Return summed dollar risk across *open_positions*.
+
+        Risk for a position is ``(entry_price - current_stop) × current_qty``,
+        floored at zero: once a stop is raised to or above breakeven the
+        position carries no downside risk to the account, so trimmed and
+        breakeven-stopped positions naturally contribute ~0 and stop
+        consuming heat.  PENDING entries count at their intended risk --
+        an unfilled buy-stop still reserves risk the same way it reserves
+        a slot.
+        """
+        total = 0.0
+        for p in open_positions:
+            entry = p.get("entry_price")
+            stop = p.get("current_stop")
+            qty = p.get("current_qty")
+            if entry is None or stop is None or not qty:
+                continue
+            total += max(0.0, (float(entry) - float(stop)) * float(qty))
+        return total
+
+    def _check_sector(
+        self,
+        symbol: str,
+        proposed_value: float,
+        portfolio_value: float,
+        open_positions: List[Dict[str, Any]],
+        broker_positions: List[Any],
+        checks: Dict[str, Any],
+    ) -> Optional[GuardrailResult]:
+        """Enforce the per-sector exposure cap.
+
+        Returns a blocking ``GuardrailResult`` or ``None`` to continue.
+        Any lookup failure returns ``None`` (fail open) -- see
+        ``dataflows.sector``.  Unlike the exposure and heat checks, whose
+        inputs are local, this one depends on a third-party data feed, so
+        it must never be the reason trading halts.
+        """
+        try:
+            return self._sector_result(
+                symbol, proposed_value, portfolio_value,
+                open_positions, broker_positions, checks,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Sector cap check errored for %s (%s) -- not enforced",
+                symbol, exc,
+            )
+            checks["sector_check_skipped"] = True
+            return None
+
+    def _sector_result(
+        self,
+        symbol: str,
+        proposed_value: float,
+        portfolio_value: float,
+        open_positions: List[Dict[str, Any]],
+        broker_positions: List[Any],
+        checks: Dict[str, Any],
+    ) -> Optional[GuardrailResult]:
+        """Sector-cap arithmetic.  See ``_check_sector`` for the contract."""
+        from tradingagents.dataflows.sector import get_sector, prime_cache
+
+        # Reuse sectors already stored on position rows so a full book
+        # costs at most one network lookup (the proposed symbol).
+        prime_cache({
+            p["symbol"]: p.get("sector")
+            for p in open_positions if p.get("symbol")
+        })
+
+        proposed_sector = get_sector(symbol)
+        checks["proposed_sector"] = proposed_sector
+        if not proposed_sector:
+            logger.warning(
+                "Sector unavailable for %s -- sector cap not enforced", symbol
+            )
+            checks["sector_check_skipped"] = True
+            return None
+
+        # Market value comes from the broker (live prices); the DB tells us
+        # which symbols belong to the sector.
+        market_values = {
+            p.symbol: abs(float(p.market_value)) for p in broker_positions
+        }
+        same_sector = 0.0
+        for p in open_positions:
+            sym = p.get("symbol")
+            if not sym or sym == symbol:
+                continue
+            if get_sector(sym) != proposed_sector:
+                continue
+            # A PENDING entry has no broker position yet; fall back to its
+            # intended notional so it still reserves sector room.
+            same_sector += market_values.get(
+                sym, float(p.get("entry_price") or 0) * float(p.get("current_qty") or 0)
+            )
+
+        new_sector_value = same_sector + proposed_value
+        max_sector_value = portfolio_value * self._max_sector_pct
+        checks["current_sector_exposure"] = round(same_sector, 2)
+        checks["new_sector_exposure"] = round(new_sector_value, 2)
+        checks["max_sector_value"] = round(max_sector_value, 2)
+        if new_sector_value > max_sector_value:
+            return GuardrailResult(
+                approved=False,
+                reason=(
+                    f"{proposed_sector} exposure ${new_sector_value:,.0f} "
+                    f"exceeds {self._max_sector_pct:.0%} sector cap "
+                    f"(${max_sector_value:,.0f})"
+                ),
+                checks=checks,
+            )
+        return None
 
     def validate_entry(
         self,
         symbol: str,
         proposed_value: float,
+        proposed_risk: Optional[float] = None,
     ) -> GuardrailResult:
         """Validate whether a new entry for *symbol* should be allowed.
 
@@ -98,6 +221,10 @@ class Guardrails:
             Ticker symbol for the proposed trade.
         proposed_value : float
             Dollar value of the proposed position (qty × price).
+        proposed_risk : float, optional
+            Dollar risk of the proposed position -- ``(entry - stop) × qty``.
+            When omitted the portfolio-heat check is skipped, so callers
+            that size by risk should always pass it.
 
         Returns
         -------
@@ -106,6 +233,7 @@ class Guardrails:
             with the rejection reason.
         """
         checks = {}
+        open_positions: List[Dict[str, Any]] = []
 
         # 0. Regime pause (VIX > 30)
         if self._pause_entries:
@@ -194,6 +322,43 @@ class Guardrails:
                         ),
                         checks=checks,
                     )
+
+                # 3c. Max portfolio heat -- summed open risk.
+                # This is the primary concentration control: unlike a raw
+                # position count it scales with how much each trade actually
+                # risks, so tight setups earn more slots than sloppy ones.
+                if proposed_risk is not None:
+                    current_heat = self._open_risk(open_positions)
+                    new_heat = current_heat + proposed_risk
+                    max_heat_value = portfolio_value * self._max_heat_pct
+                    checks["current_heat"] = round(current_heat, 2)
+                    checks["new_heat"] = round(new_heat, 2)
+                    checks["max_heat_value"] = round(max_heat_value, 2)
+                    checks["new_heat_pct"] = (
+                        round(new_heat / portfolio_value, 6)
+                        if portfolio_value > 0 else 0
+                    )
+                    if new_heat > max_heat_value:
+                        return GuardrailResult(
+                            approved=False,
+                            reason=(
+                                f"portfolio heat ${new_heat:,.0f} exceeds "
+                                f"{self._max_heat_pct:.2%} cap "
+                                f"(${max_heat_value:,.0f})"
+                            ),
+                            checks=checks,
+                        )
+
+                # 3d. Max sector exposure -- momentum leaders cluster into
+                # themes, so N positions can amount to a single bet.
+                # Fails open: an unresolvable sector skips the check rather
+                # than halting trading on a data-provider outage.
+                sector_result = self._check_sector(
+                    symbol, proposed_value, portfolio_value,
+                    open_positions, positions, checks,
+                )
+                if sector_result is not None:
+                    return sector_result
 
             except Exception as exc:
                 logger.error("Guardrail portfolio checks failed: %s", exc)
